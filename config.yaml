@@ -1,0 +1,10 @@
+# Jellyfin TUI Configuration
+jellyfin:
+  # Your Jellyfin server URL
+  server_url: "http://localhost:8096"
+
+# Logging level (debug, info, error)
+loglevel: info
+
+# Authentication is done via Quick Connect only
+# When you run the app, it will show a code to enter in another Jellyfin app
