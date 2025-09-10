@@ -568,8 +568,8 @@ func (m model) selectItem() (model, tea.Cmd) {
 
 func playItem(client *jellyfin.Client, itemID string) tea.Cmd {
 	return func() tea.Msg {
-		// Get stream URL
-		streamURL := client.Playback.GetStreamURL(itemID)
+		// Get download URL for full video file (better mpv control)
+		streamURL := client.Playback.GetDownloadURL(itemID)
 		
 		// Launch mpv with the stream URL
 		cmd := exec.Command("mpv", streamURL)
