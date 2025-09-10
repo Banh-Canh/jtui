@@ -7,6 +7,12 @@ A fast, efficient TUI (Terminal User Interface) for browsing and navigating your
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Go Version](https://img.shields.io/badge/go-1.24+-blue.svg)
 
+## Screenshot
+
+![JTUI Screenshot](assets/screenshot.png)
+
+*Example of JTUI in action - browsing your Jellyfin media library from the terminal*
+
 ## Features
 
 - 🚀 Fast and responsive terminal interface
