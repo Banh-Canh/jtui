@@ -267,6 +267,36 @@ func loadNextUp(client *jellyfin.Client) tea.Cmd {
 	}
 }
 
+func loadRecentlyAddedMovies(client *jellyfin.Client) tea.Cmd {
+	return func() tea.Msg {
+		items, err := client.Items.GetRecentlyAddedMovies()
+		if err != nil {
+			return errMsg{err}
+		}
+		return itemsLoadedMsg{items}
+	}
+}
+
+func loadRecentlyAddedShows(client *jellyfin.Client) tea.Cmd {
+	return func() tea.Msg {
+		items, err := client.Items.GetRecentlyAddedShows()
+		if err != nil {
+			return errMsg{err}
+		}
+		return itemsLoadedMsg{items}
+	}
+}
+
+func loadRecentlyAddedEpisodes(client *jellyfin.Client) tea.Cmd {
+	return func() tea.Msg {
+		items, err := client.Items.GetRecentlyAddedEpisodes()
+		if err != nil {
+			return errMsg{err}
+		}
+		return itemsLoadedMsg{items}
+	}
+}
+
 func toggleWatchedStatus(client *jellyfin.Client, itemID string, currentDetails *jellyfin.DetailedItem) tea.Cmd {
 	return func() tea.Msg {
 		if currentDetails == nil {
@@ -292,6 +322,15 @@ func toggleWatchedStatus(client *jellyfin.Client, itemID string, currentDetails 
 
 		return watchStatusUpdatedMsg{itemID: itemID, watched: newWatchedStatus}
 	}
+}
+
+// isVirtualFolder checks if an item ID is a virtual folder
+func isVirtualFolder(itemID string) bool {
+	return itemID == "virtual-continue-watching" || 
+		   itemID == "virtual-next-up" || 
+		   itemID == "virtual-recently-added-movies" || 
+		   itemID == "virtual-recently-added-shows" || 
+		   itemID == "virtual-recently-added-episodes"
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -327,6 +366,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				IsFolder: true,  
 				Type:     "VirtualFolder",
 			},
+			&jellyfin.SimpleItem{
+				Name:     "Recently Added Movies",
+				ID:       "virtual-recently-added-movies",
+				IsFolder: true,
+				Type:     "VirtualFolder",
+			},
+			&jellyfin.SimpleItem{
+				Name:     "Recently Added Shows",
+				ID:       "virtual-recently-added-shows",
+				IsFolder: true,
+				Type:     "VirtualFolder",
+			},
+			&jellyfin.SimpleItem{
+				Name:     "Recently Added Episodes",
+				ID:       "virtual-recently-added-episodes",
+				IsFolder: true,
+				Type:     "VirtualFolder",
+			},
 		}
 		// Combine virtual directories with real libraries
 		m.items = append(virtualItems, msg.items...)
@@ -336,7 +393,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.items) > 0 {
 			// Handle initial selection
 			itemID := m.items[0].GetID()
-			if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+			if isVirtualFolder(itemID) {
 				// Clear detail panel for virtual directories
 				m.currentDetails = nil
 			} else {
@@ -478,7 +535,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if len(m.items) > 0 {
 				itemID := m.items[m.cursor].GetID()
-				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+				if isVirtualFolder(itemID) {
 					// Clear detail panel for virtual directories
 					m.currentDetails = nil
 				} else {
@@ -492,7 +549,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if len(m.items) > 0 {
 				itemID := m.items[m.cursor].GetID()
-				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+				if isVirtualFolder(itemID) {
 					// Clear detail panel for virtual directories
 					m.currentDetails = nil
 				} else {
@@ -506,7 +563,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewportOffset = 0
 				m.updateViewport()
 				itemID := m.items[m.cursor].GetID()
-				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+				if isVirtualFolder(itemID) {
 					// Clear detail panel for virtual directories
 					m.currentDetails = nil
 				} else {
@@ -519,7 +576,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = len(m.items) - 1
 				m.updateViewportForBottom()
 				itemID := m.items[m.cursor].GetID()
-				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+				if isVirtualFolder(itemID) {
 					// Clear detail panel for virtual directories
 					m.currentDetails = nil
 				} else {
@@ -539,7 +596,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateViewport()
 				
 				itemID := m.items[m.cursor].GetID()
-				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+				if isVirtualFolder(itemID) {
 					// Clear detail panel for virtual directories
 					m.currentDetails = nil
 				} else {
@@ -559,7 +616,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateViewport()
 				
 				itemID := m.items[m.cursor].GetID()
-				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+				if isVirtualFolder(itemID) {
 					// Clear detail panel for virtual directories
 					m.currentDetails = nil
 				} else {
@@ -623,6 +680,27 @@ func (m model) selectItem() (model, tea.Cmd) {
 			})
 			m.loading = true
 			return m, loadNextUp(m.client)
+		} else if item.GetID() == "virtual-recently-added-movies" {
+			m.currentPath = append(m.currentPath, pathItem{
+				name: item.GetName(),
+				id:   item.GetID(),
+			})
+			m.loading = true
+			return m, loadRecentlyAddedMovies(m.client)
+		} else if item.GetID() == "virtual-recently-added-shows" {
+			m.currentPath = append(m.currentPath, pathItem{
+				name: item.GetName(),
+				id:   item.GetID(),
+			})
+			m.loading = true
+			return m, loadRecentlyAddedShows(m.client)
+		} else if item.GetID() == "virtual-recently-added-episodes" {
+			m.currentPath = append(m.currentPath, pathItem{
+				name: item.GetName(),
+				id:   item.GetID(),
+			})
+			m.loading = true
+			return m, loadRecentlyAddedEpisodes(m.client)
 		}
 		
 		// Navigate into regular folder/library
@@ -1191,6 +1269,12 @@ func (m model) renderDetails(width, height int) string {
 				return infoStyle.Render("Continue Watching\n\nShows media you've partially watched.\nPress Enter to view your progress.")
 			case "virtual-next-up":
 				return infoStyle.Render("Next Up\n\nShows the next episodes in your TV series.\nPress Enter to continue watching.")
+			case "virtual-recently-added-movies":
+				return infoStyle.Render("Recently Added Movies\n\nShows the latest movies added to your library.\nPress Enter to browse recently added movies.")
+			case "virtual-recently-added-shows":
+				return infoStyle.Render("Recently Added Shows\n\nShows the latest TV shows added to your library.\nPress Enter to browse recently added shows.")
+			case "virtual-recently-added-episodes":
+				return infoStyle.Render("Recently Added Episodes\n\nShows the latest episodes added to your library.\nPress Enter to browse recently added episodes.")
 			}
 		}
 		return dimStyle.Render("Select an item to view details")

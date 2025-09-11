@@ -233,3 +233,129 @@ func (i *ItemsAPI) GetAncestors(itemID string) ([]Item, error) {
 
 	return items, nil
 }
+
+// GetRecentlyAddedMovies returns recently added movies
+func (i *ItemsAPI) GetRecentlyAddedMovies() ([]Item, error) {
+	if !i.client.IsAuthenticated() {
+		return nil, fmt.Errorf("client is not authenticated")
+	}
+
+	url := fmt.Sprintf("%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Movie&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1", 
+		i.client.config.ServerURL, i.client.config.UserID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		i.client.config.ClientName, i.client.config.ClientName, i.client.config.DeviceID, i.client.config.Version, i.client.config.AccessToken))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := i.client.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var response DetailedItemsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	items := make([]Item, len(response.Items))
+	for j, item := range response.Items {
+		items[j] = item
+	}
+
+	return items, nil
+}
+
+// GetRecentlyAddedShows returns recently added TV shows
+func (i *ItemsAPI) GetRecentlyAddedShows() ([]Item, error) {
+	if !i.client.IsAuthenticated() {
+		return nil, fmt.Errorf("client is not authenticated")
+	}
+
+	url := fmt.Sprintf("%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Series&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1", 
+		i.client.config.ServerURL, i.client.config.UserID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		i.client.config.ClientName, i.client.config.ClientName, i.client.config.DeviceID, i.client.config.Version, i.client.config.AccessToken))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := i.client.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var response DetailedItemsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	items := make([]Item, len(response.Items))
+	for j, item := range response.Items {
+		items[j] = item
+	}
+
+	return items, nil
+}
+
+// GetRecentlyAddedEpisodes returns recently added episodes
+func (i *ItemsAPI) GetRecentlyAddedEpisodes() ([]Item, error) {
+	if !i.client.IsAuthenticated() {
+		return nil, fmt.Errorf("client is not authenticated")
+	}
+
+	url := fmt.Sprintf("%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Episode&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1", 
+		i.client.config.ServerURL, i.client.config.UserID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		i.client.config.ClientName, i.client.config.ClientName, i.client.config.DeviceID, i.client.config.Version, i.client.config.AccessToken))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := i.client.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var response DetailedItemsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	items := make([]Item, len(response.Items))
+	for j, item := range response.Items {
+		items[j] = item
+	}
+
+	return items, nil
+}
