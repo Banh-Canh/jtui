@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/viper"
+	"github.com/blacktop/go-termimg"
 
 	"github.com/Banh-Canh/jtui/pkg/jellyfin"
 )
@@ -48,6 +49,7 @@ type model struct {
 	height         int
 	viewport       int
 	viewportOffset int
+	thumbnailCache map[string]string // Cache for rendered thumbnails
 }
 
 // Messages
@@ -80,6 +82,12 @@ func (e errMsg) Error() string { return e.err.Error() }
 type watchStatusUpdatedMsg struct {
 	itemID  string
 	watched bool
+}
+
+type thumbnailLoadedMsg struct {
+	itemID    string
+	cacheKey  string
+	thumbnail string
 }
 
 // Styles
@@ -141,7 +149,7 @@ func initialModel() model {
 		return viper.GetString(key)
 	})
 	if err != nil {
-		return model{err: err}
+		return model{err: err, thumbnailCache: make(map[string]string)}
 	}
 
 	return model{
@@ -156,6 +164,7 @@ func initialModel() model {
 		height:         24,
 		viewport:       15,
 		viewportOffset: 0,
+		thumbnailCache: make(map[string]string),
 	}
 }
 
@@ -172,6 +181,7 @@ func initialModelWithClient(client *jellyfin.Client) model {
 		height:         24,
 		viewport:       15,
 		viewportOffset: 0,
+		thumbnailCache: make(map[string]string),
 	}
 }
 
@@ -225,6 +235,7 @@ func loadItemDetails(client *jellyfin.Client, itemID string) tea.Cmd {
 		return itemDetailsLoadedMsg{details}
 	}
 }
+
 
 func searchItems(client *jellyfin.Client, query string) tea.Cmd {
 	return func() tea.Msg {
@@ -323,9 +334,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewportOffset = 0
 		m.updateViewport()
 		if len(m.items) > 0 {
-			// Skip loading details for virtual directories
+			// Handle initial selection
 			itemID := m.items[0].GetID()
-			if itemID != "virtual-continue-watching" && itemID != "virtual-next-up" {
+			if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+				// Clear detail panel for virtual directories
+				m.currentDetails = nil
+			} else {
 				return m, loadItemDetails(m.client, itemID)
 			}
 		}
@@ -355,6 +369,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case itemDetailsLoadedMsg:
 		m.currentDetails = msg.details
+		
+		// Limit cache size to prevent memory growth - keep only recent items
+		if len(m.thumbnailCache) > 20 {
+			// Clear old entries, keep only items with current item ID
+			newCache := make(map[string]string)
+			currentItemID := m.currentDetails.GetID()
+			for key, value := range m.thumbnailCache {
+				if strings.HasPrefix(key, currentItemID+"_") {
+					newCache[key] = value
+				}
+			}
+			m.thumbnailCache = newCache
+		}
+		
 		return m, nil
 
 	case searchResultsMsg:
@@ -372,6 +400,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = msg.err
 		m.loading = false
+		return m, nil
+
+	case thumbnailLoadedMsg:
+		// Store thumbnail in cache
+		m.thumbnailCache[msg.cacheKey] = msg.thumbnail
 		return m, nil
 
 	case watchStatusUpdatedMsg:
@@ -445,7 +478,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if len(m.items) > 0 {
 				itemID := m.items[m.cursor].GetID()
-				if itemID != "virtual-continue-watching" && itemID != "virtual-next-up" {
+				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+					// Clear detail panel for virtual directories
+					m.currentDetails = nil
+				} else {
 					return m, loadItemDetails(m.client, itemID)
 				}
 			}
@@ -456,7 +492,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if len(m.items) > 0 {
 				itemID := m.items[m.cursor].GetID()
-				if itemID != "virtual-continue-watching" && itemID != "virtual-next-up" {
+				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+					// Clear detail panel for virtual directories
+					m.currentDetails = nil
+				} else {
 					return m, loadItemDetails(m.client, itemID)
 				}
 			}
@@ -467,7 +506,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewportOffset = 0
 				m.updateViewport()
 				itemID := m.items[m.cursor].GetID()
-				if itemID != "virtual-continue-watching" && itemID != "virtual-next-up" {
+				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+					// Clear detail panel for virtual directories
+					m.currentDetails = nil
+				} else {
 					return m, loadItemDetails(m.client, itemID)
 				}
 			}
@@ -477,7 +519,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor = len(m.items) - 1
 				m.updateViewportForBottom()
 				itemID := m.items[m.cursor].GetID()
-				if itemID != "virtual-continue-watching" && itemID != "virtual-next-up" {
+				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+					// Clear detail panel for virtual directories
+					m.currentDetails = nil
+				} else {
 					return m, loadItemDetails(m.client, itemID)
 				}
 			}
@@ -494,7 +539,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateViewport()
 				
 				itemID := m.items[m.cursor].GetID()
-				if itemID != "virtual-continue-watching" && itemID != "virtual-next-up" {
+				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+					// Clear detail panel for virtual directories
+					m.currentDetails = nil
+				} else {
 					return m, loadItemDetails(m.client, itemID)
 				}
 			}
@@ -511,7 +559,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateViewport()
 				
 				itemID := m.items[m.cursor].GetID()
-				if itemID != "virtual-continue-watching" && itemID != "virtual-next-up" {
+				if itemID == "virtual-continue-watching" || itemID == "virtual-next-up" {
+					// Clear detail panel for virtual directories
+					m.currentDetails = nil
+				} else {
 					return m, loadItemDetails(m.client, itemID)
 				}
 			}
@@ -708,6 +759,154 @@ func getMpvPosition() float64 {
 	}
 	
 	return 0
+}
+
+// renderThumbnailInline renders thumbnail image inline in terminal using halfblock renderer
+func renderThumbnailInline(imageURL string, width, height int) (string, error) {
+	if imageURL == "" {
+		return "", fmt.Errorf("no image URL provided")
+	}
+
+	// Validate dimensions to prevent excessive sizes
+	if width > 60 {
+		width = 60
+	}
+	if height > 25 {
+		height = 25
+	}
+	if width < 15 {
+		width = 15
+	}
+	if height < 6 {
+		height = 6
+	}
+
+	// Download image to temporary file with timeout
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(imageURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to download image: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Create temporary file
+	tmpFile, err := os.CreateTemp("", "jtui_thumb_*.jpg")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	// Copy image data to temp file with size limit
+	limitedReader := io.LimitReader(resp.Body, 10*1024*1024) // 10MB limit
+	_, err = io.Copy(tmpFile, limitedReader)
+	if err != nil {
+		return "", fmt.Errorf("failed to write temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	// Render image using go-termimg with forced halfblock renderer
+	img, err := termimg.Open(tmpFile.Name())
+	if err != nil {
+		return "", fmt.Errorf("failed to open image: %w", err)
+	}
+
+	// Configure dimensions and explicitly force halfblock renderer
+	rendered, err := img.Width(width).Height(height).Protocol(termimg.Halfblocks).Render()
+	if err != nil {
+		return "", fmt.Errorf("failed to render image: %w", err)
+	}
+
+	// Validate the output doesn't exceed expected dimensions
+	lines := strings.Split(rendered, "\n")
+	if len(lines) > height+2 { // Allow some tolerance
+		// Truncate if too many lines
+		rendered = strings.Join(lines[:height], "\n")
+	}
+
+	return rendered, nil
+}
+
+// renderThumbnailInlineOptimized renders thumbnail with disk caching for better performance
+func renderThumbnailInlineOptimized(imageURL string, width, height int, itemID string) (string, error) {
+	if imageURL == "" {
+		return "", fmt.Errorf("no image URL provided")
+	}
+
+	// Validate dimensions to prevent excessive sizes
+	if width > 70 {
+		width = 70
+	}
+	if height > 30 {
+		height = 30
+	}
+	if width < 20 {
+		width = 20
+	}
+	if height < 8 {
+		height = 8
+	}
+
+	// Check for persistent cache file first
+	cacheDir := "/tmp/jtui_thumbs"
+	os.MkdirAll(cacheDir, 0755)
+	cacheFile := fmt.Sprintf("%s/%s_%dx%d.txt", cacheDir, itemID, width, height)
+	
+	// Try to read from cache
+	if cached, err := os.ReadFile(cacheFile); err == nil {
+		return string(cached), nil
+	}
+
+	// Download image to temporary file with timeout (reuse existing logic but optimize)
+	tmpFile := fmt.Sprintf("/tmp/jtui_img_%s.jpg", itemID)
+	
+	// Check if image already downloaded
+	if _, err := os.Stat(tmpFile); os.IsNotExist(err) {
+		client := &http.Client{Timeout: 5 * time.Second} // Reduced timeout
+		resp, err := client.Get(imageURL)
+		if err != nil {
+			return "", fmt.Errorf("failed to download image: %w", err)
+		}
+		defer resp.Body.Close()
+
+		file, err := os.Create(tmpFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to create temp file: %w", err)
+		}
+		defer file.Close()
+
+		// Copy with size limit
+		limitedReader := io.LimitReader(resp.Body, 5*1024*1024) // Reduced to 5MB
+		_, err = io.Copy(file, limitedReader)
+		if err != nil {
+			return "", fmt.Errorf("failed to write temp file: %w", err)
+		}
+	}
+
+	// Render image using go-termimg with forced halfblock renderer
+	img, err := termimg.Open(tmpFile)
+	if err != nil {
+		os.Remove(tmpFile) // Clean up on error
+		return "", fmt.Errorf("failed to open image: %w", err)
+	}
+
+	// Configure dimensions and explicitly force halfblock renderer
+	rendered, err := img.Width(width).Height(height).Protocol(termimg.Halfblocks).Render()
+	if err != nil {
+		return "", fmt.Errorf("failed to render image: %w", err)
+	}
+
+	// Validate the output doesn't exceed expected dimensions
+	lines := strings.Split(rendered, "\n")
+	if len(lines) > height+2 { // Allow some tolerance
+		// Truncate if too many lines
+		rendered = strings.Join(lines[:height], "\n")
+	}
+
+	// Cache the result to disk for next time
+	os.WriteFile(cacheFile, []byte(rendered), 0644)
+
+	return rendered, nil
 }
 
 func openThumbnail(client *jellyfin.Client, details *jellyfin.DetailedItem) tea.Cmd {
@@ -984,6 +1183,16 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 
 func (m model) renderDetails(width, height int) string {
 	if m.currentDetails == nil {
+		// Check if we're on a virtual directory and show appropriate message
+		if len(m.items) > 0 && m.cursor < len(m.items) {
+			itemID := m.items[m.cursor].GetID()
+			switch itemID {
+			case "virtual-continue-watching":
+				return infoStyle.Render("Continue Watching\n\nShows media you've partially watched.\nPress Enter to view your progress.")
+			case "virtual-next-up":
+				return infoStyle.Render("Next Up\n\nShows the next episodes in your TV series.\nPress Enter to continue watching.")
+			}
+		}
 		return dimStyle.Render("Select an item to view details")
 	}
 	
@@ -998,6 +1207,70 @@ func (m model) renderDetails(width, height int) string {
 	
 	if linesUsed >= maxLines {
 		return details.String()
+	}
+
+	// Render thumbnail if available and there's space (need at least 12 lines total)
+	if m.currentDetails.HasPrimaryImage() && maxLines > 12 {
+		imageURL := m.client.Items.GetImageURL(m.currentDetails.GetID(), "Primary", m.currentDetails.ImageTags.Primary)
+		if imageURL != "" {
+			// Calculate dimensions - make it slightly bigger
+			thumbWidth := width - 2
+			if thumbWidth > 50 {
+				thumbWidth = 50
+			}
+			if thumbWidth < 30 {
+				thumbWidth = 30
+			}
+			// Use more space for height - about 45% of available space
+			thumbHeight := (maxLines * 9) / 20 
+			if thumbHeight > 18 {
+				thumbHeight = 18 // Cap at 18 lines
+			}
+			if thumbHeight < 10 {
+				thumbHeight = 10 // Minimum 10 lines
+			}
+			
+			// Check cache first - ensure it's for the current item
+			currentItemID := m.currentDetails.GetID()
+			cacheKey := fmt.Sprintf("%s_%d_%d", currentItemID, thumbWidth, thumbHeight)
+			
+			if cachedThumbnail, exists := m.thumbnailCache[cacheKey]; exists {
+				// Use cached thumbnail for this specific item
+				thumbnailLines := strings.Count(cachedThumbnail, "\n")
+				if thumbnailLines == 0 && cachedThumbnail != "" {
+					thumbnailLines = 1
+				}
+				
+				if linesUsed + thumbnailLines + 3 < maxLines {
+					details.WriteString(cachedThumbnail)
+					details.WriteString("\n\n")
+					linesUsed += thumbnailLines + 2
+				}
+			} else {
+				// Render and cache immediately (but with optimizations)
+				if thumbnail, err := renderThumbnailInlineOptimized(imageURL, thumbWidth, thumbHeight, currentItemID); err == nil {
+					// Cache the result for this specific item
+					m.thumbnailCache[cacheKey] = thumbnail
+					
+					// Count actual lines in the rendered thumbnail
+					thumbnailLines := strings.Count(thumbnail, "\n")
+					if thumbnailLines == 0 && thumbnail != "" {
+						thumbnailLines = 1
+					}
+					
+					// Check if we have space for the thumbnail plus some detail text
+					if linesUsed + thumbnailLines + 3 < maxLines {
+						details.WriteString(thumbnail)
+						details.WriteString("\n\n")
+						linesUsed += thumbnailLines + 2
+					}
+				}
+			}
+			
+			if linesUsed >= maxLines {
+				return details.String()
+			}
+		}
 	}
 	
 	
