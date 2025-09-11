@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -44,6 +45,7 @@ type model struct {
 	currentDetails *jellyfin.DetailedItem
 	loading        bool
 	err            error
+	successMsg     string
 	searchQuery    string
 	width          int
 	height         int
@@ -78,6 +80,10 @@ type errMsg struct {
 }
 
 func (e errMsg) Error() string { return e.err.Error() }
+
+type successMsg struct {
+	message string
+}
 
 type watchStatusUpdatedMsg struct {
 	itemID  string
@@ -343,6 +349,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	
+	// Clear success message on any key press
+	if m.successMsg != "" {
+		switch msg.(type) {
+		case tea.KeyMsg:
+			m.successMsg = ""
+			// Continue processing the key
+		}
+	}
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -456,7 +471,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.err = msg.err
+		m.successMsg = "" // Clear success message when error occurs
 		m.loading = false
+		return m, nil
+
+	case successMsg:
+		m.successMsg = msg.message
+		m.err = nil // Clear error when success occurs
 		return m, nil
 
 	case thumbnailLoadedMsg:
@@ -529,6 +550,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		case "up", "k":
+			m.successMsg = "" // Clear success messages on navigation
 			if m.cursor > 0 {
 				m.cursor--
 				m.updateViewport()
@@ -543,6 +565,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "down", "j":
+			m.successMsg = "" // Clear success messages on navigation
 			if m.cursor < len(m.items)-1 {
 				m.cursor++
 				m.updateViewport()
@@ -887,7 +910,7 @@ func downloadVideo(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cmd
 	return func() tea.Msg {
 		// Check if already downloaded
 		if downloaded, filePath, err := client.Download.IsDownloaded(item); err == nil && downloaded {
-			return errMsg{fmt.Errorf("video already downloaded at: %s", filePath)}
+			return successMsg{fmt.Sprintf("✓ Video already downloaded: %s", filepath.Base(filePath))}
 		}
 		
 		// Start download with progress tracking
@@ -903,7 +926,7 @@ func downloadVideo(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cmd
 			return errMsg{fmt.Errorf("download failed: %w", err)}
 		}
 		
-		return nil // Success - could return a success message
+		return successMsg{fmt.Sprintf("✓ Downloaded: %s", item.Name)}
 	}
 }
 
@@ -915,7 +938,7 @@ func removeDownload(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cm
 			return errMsg{fmt.Errorf("failed to remove download: %w", err)}
 		}
 		
-		return nil // Success - could return a success message
+		return successMsg{fmt.Sprintf("✓ Removed download: %s", item.Name)}
 	}
 }
 
@@ -1164,6 +1187,10 @@ func (m *model) updateViewportForBottom() {
 func (m model) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("Error: %v\n\nPress 'q' to quit.", m.err)
+	}
+	
+	if m.successMsg != "" {
+		return fmt.Sprintf("%s\n\nPress any key to continue.", m.successMsg)
 	}
 
 	if m.loading {
