@@ -655,6 +655,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentView = SearchView
 			m.searchQuery = ""
 			return m, nil
+		case "d":
+			// Download video
+			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil {
+				return m, downloadVideo(m.client, m.currentDetails)
+			}
+		case "x":
+			// Remove downloaded video
+			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil {
+				return m, removeDownload(m.client, m.currentDetails)
+			}
 		}
 	}
 
@@ -728,8 +738,34 @@ var runningMpvProcesses []*exec.Cmd
 
 func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) tea.Cmd {
 	return func() tea.Msg {
-		// Get download URL for full video file (better mpv control)
-		streamURL := client.Playback.GetDownloadURL(itemID)
+		var streamURL string
+		var isLocal bool
+		
+		// Get detailed item info to check for local copy
+		detailedItem, err := client.Items.GetDetails(itemID)
+		if err != nil {
+			// Fallback to remote if we can't get details
+			detailedItem = nil
+		}
+		
+		// Handle offline content differently
+		if client.IsOfflineMode() && strings.HasPrefix(itemID, "offline-") {
+			// Check if this is a series (folder) - can't play folders
+			if strings.HasPrefix(itemID, "offline-series-") {
+				return errMsg{fmt.Errorf("cannot play a series folder - please select an episode")}
+			}
+			
+			// Get the local file path directly for offline content (episodes/movies only)
+			_, filePath, err := client.Download.GetOfflineItemByID(itemID)
+			if err != nil {
+				return errMsg{fmt.Errorf("failed to get offline content: %w", err)}
+			}
+			streamURL = filePath
+			isLocal = true
+		} else {
+			// Get playback URL (local file or remote stream)
+			streamURL, isLocal = client.Playback.GetPlaybackURL(itemID, detailedItem)
+		}
 		
 		// Prepare mpv command with JSON IPC enabled for position tracking
 		args := []string{"--input-ipc-server=/tmp/mpvsocket"}
@@ -749,31 +785,36 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 		
 		// Start playback tracking in background
 		go func() {
-			// Report playback start
-			client.Playback.ReportStart(itemID)
+			// Only report to server if playing remote content
+			if !isLocal {
+				// Report playback start
+				client.Playback.ReportStart(itemID)
+			}
 			
 			// Channel to stop progress reporting when mpv exits
 			done := make(chan bool)
 			
-			// Start continuous progress reporting goroutine
-			go func() {
-				ticker := time.NewTicker(5 * time.Second) // Report every 5 seconds
-				defer ticker.Stop()
-				
-				for {
-					select {
-					case <-done:
-						return
-					case <-ticker.C:
-						if position := getMpvPosition(); position > 0 {
-							// Convert seconds to ticks (1 tick = 100 nanoseconds)
-							positionTicks := int64(position * 10000000)
-							// Continuously sync progress to server
-							client.Playback.ReportProgress(itemID, positionTicks)
+			// Start continuous progress reporting goroutine (only for remote content)
+			if !isLocal {
+				go func() {
+					ticker := time.NewTicker(5 * time.Second) // Report every 5 seconds
+					defer ticker.Stop()
+					
+					for {
+						select {
+						case <-done:
+							return
+						case <-ticker.C:
+							if position := getMpvPosition(); position > 0 {
+								// Convert seconds to ticks (1 tick = 100 nanoseconds)
+								positionTicks := int64(position * 10000000)
+								// Continuously sync progress to server
+								client.Playback.ReportProgress(itemID, positionTicks)
+							}
 						}
 					}
-				}
-			}()
+				}()
+			}
 			
 			// Run mpv and wait for completion
 			cmd.Run()
@@ -789,10 +830,12 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 				}
 			}
 			
-			// Send final progress update
-			if finalPosition := getMpvPosition(); finalPosition > 0 {
-				finalPositionTicks := int64(finalPosition * 10000000)
-				client.Playback.ReportProgress(itemID, finalPositionTicks)
+			// Send final progress update (only for remote content)
+			if !isLocal {
+				if finalPosition := getMpvPosition(); finalPosition > 0 {
+					finalPositionTicks := int64(finalPosition * 10000000)
+					client.Playback.ReportProgress(itemID, finalPositionTicks)
+				}
 			}
 		}()
 		
@@ -837,6 +880,43 @@ func getMpvPosition() float64 {
 	}
 	
 	return 0
+}
+
+// downloadVideo downloads a video file for offline viewing
+func downloadVideo(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cmd {
+	return func() tea.Msg {
+		// Check if already downloaded
+		if downloaded, filePath, err := client.Download.IsDownloaded(item); err == nil && downloaded {
+			return errMsg{fmt.Errorf("video already downloaded at: %s", filePath)}
+		}
+		
+		// Start download with progress tracking
+		err := client.Download.DownloadVideo(item, func(downloaded, total int64) {
+			// Progress callback - for now just log, could be enhanced with progress display
+			if total > 0 {
+				percentage := float64(downloaded) / float64(total) * 100
+				fmt.Printf("\rDownloading: %.1f%%", percentage)
+			}
+		})
+		
+		if err != nil {
+			return errMsg{fmt.Errorf("download failed: %w", err)}
+		}
+		
+		return nil // Success - could return a success message
+	}
+}
+
+// removeDownload removes a downloaded video file
+func removeDownload(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cmd {
+	return func() tea.Msg {
+		err := client.Download.RemoveDownload(item)
+		if err != nil {
+			return errMsg{fmt.Errorf("failed to remove download: %w", err)}
+		}
+		
+		return nil // Success - could return a success message
+	}
 }
 
 // renderThumbnailInline renders thumbnail image inline in terminal using halfblock renderer
@@ -1146,7 +1226,11 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 	title := ""
 	switch m.currentView {
 	case LibraryView:
-		title = "Libraries"
+		if m.client.IsOfflineMode() {
+			title = "Libraries 🔌 OFFLINE"
+		} else {
+			title = "Libraries"
+		}
 	case SearchView:
 		title = fmt.Sprintf("Search: %s", m.searchQuery)
 		if len(title) > width-4 {
@@ -1154,12 +1238,21 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 		}
 	default:
 		if len(m.currentPath) > 0 {
-			title = m.currentPath[len(m.currentPath)-1].name
+			baseName := m.currentPath[len(m.currentPath)-1].name
+			if m.client.IsOfflineMode() {
+				title = baseName + " 🔌 OFFLINE"
+			} else {
+				title = baseName
+			}
 			if len(title) > width-4 {
 				title = title[:width-7] + "..."
 			}
 		} else {
-			title = "Items"
+			if m.client.IsOfflineMode() {
+				title = "Items 🔌 OFFLINE"
+			} else {
+				title = "Items"
+			}
 		}
 	}
 	
@@ -1189,17 +1282,39 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 		item := m.items[i]
 		itemText := item.GetName()
 		
-		// Add watched icon based on watch status
+		// Add watched icon based on watch status and download status
 		watchedIcon := "   "
 		if detailedItem, ok := item.(jellyfin.DetailedItem); ok {
 			if !item.GetIsFolder() {
-				// Media files
-				if detailedItem.IsWatched() {
-					watchedIcon = " ✅ "
-				} else if detailedItem.HasResumePosition() {
-					watchedIcon = " ⏸️ "
+				// In offline mode, all items are already downloaded
+				if m.client.IsOfflineMode() {
+					if detailedItem.IsWatched() {
+						watchedIcon = " 💾✅ " // Downloaded and watched
+					} else if detailedItem.HasResumePosition() {
+						watchedIcon = " 💾⏸️ " // Downloaded with resume
+					} else {
+						watchedIcon = " 💾 " // Downloaded
+					}
 				} else {
-					watchedIcon = " ⭕ "
+					// Check if downloaded first (only in online mode)
+					if downloaded, _, err := m.client.Download.IsDownloaded(&detailedItem); err == nil && downloaded {
+						if detailedItem.IsWatched() {
+							watchedIcon = " 💾✅ " // Downloaded and watched
+						} else if detailedItem.HasResumePosition() {
+							watchedIcon = " 💾⏸️ " // Downloaded with resume
+						} else {
+							watchedIcon = " 💾 " // Downloaded
+						}
+					} else {
+						// Not downloaded - show normal status
+						if detailedItem.IsWatched() {
+							watchedIcon = " ✅ "
+						} else if detailedItem.HasResumePosition() {
+							watchedIcon = " ⏸️ "
+						} else {
+							watchedIcon = " ⭕ "
+						}
+					}
 				}
 			} else {
 				// Folders - show watched if all content is watched, partial if some watched
@@ -1444,6 +1559,45 @@ func (m model) renderDetails(width, height int) string {
 		}
 	}
 	
+	// Download status
+	if m.client.IsOfflineMode() {
+		// In offline mode, all content is already downloaded
+		details.WriteString(infoStyle.Render("💾 Downloaded (Offline Mode)"))
+		details.WriteString("\n")
+		linesUsed++
+		if linesUsed >= maxLines {
+			return details.String()
+		}
+	} else {
+		// Only check download status in online mode
+		if downloaded, _, err := m.client.Download.IsDownloaded(m.currentDetails); err == nil {
+			if downloaded {
+				details.WriteString(infoStyle.Render("💾 Downloaded"))
+				details.WriteString("\n")
+				// Show file size if available
+				if size, err := m.client.Download.GetDownloadSize(m.currentDetails); err == nil && size > 0 {
+					sizeStr := formatFileSize(size)
+					details.WriteString(dimStyle.Render(fmt.Sprintf("  Size: %s", sizeStr)))
+					details.WriteString("\n")
+					linesUsed++
+				}
+				details.WriteString(dimStyle.Render("  Press 'x' to remove download"))
+				details.WriteString("\n")
+				linesUsed += 2
+				if linesUsed >= maxLines {
+					return details.String()
+				}
+			} else {
+				details.WriteString(dimStyle.Render("📡 Online - Press 'd' to download"))
+				details.WriteString("\n")
+				linesUsed++
+				if linesUsed >= maxLines {
+					return details.String()
+				}
+			}
+		}
+	}
+	
 	// Watch status
 	if m.currentDetails.IsWatched() {
 		details.WriteString(dimStyle.Render("✅ Watched"))
@@ -1504,6 +1658,21 @@ func (m model) renderDetails(width, height int) string {
 	return details.String()
 }
 
+// formatFileSize formats a file size in bytes to human readable format
+func formatFileSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB",
+		float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
 // CleanupMpvProcesses kills any running mpv processes when jtui exits
 func CleanupMpvProcesses() {
 	for _, cmd := range runningMpvProcesses {
@@ -1537,6 +1706,8 @@ var helpText = strings.Join([]string{
 	"p/Space: play",
 	"r: resume",
 	"w: toggle watched",
+	"d: download",
+	"x: remove download",
 	"/: search",
 	"q: quit",
 }, " • ")

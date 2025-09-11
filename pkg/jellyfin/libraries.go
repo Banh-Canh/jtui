@@ -13,7 +13,13 @@ type LibrariesAPI struct {
 }
 
 // GetAll returns all media libraries available to the authenticated user
+// Falls back to offline content if in offline mode
 func (l *LibrariesAPI) GetAll() ([]Item, error) {
+	// If in offline mode, return offline libraries
+	if l.client.IsOfflineMode() {
+		return l.getOfflineLibraries()
+	}
+	
 	if !l.client.IsAuthenticated() {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
@@ -55,6 +61,19 @@ func (l *LibrariesAPI) GetAll() ([]Item, error) {
 	}
 
 	return items, nil
+}
+
+// getOfflineLibraries creates virtual libraries based on offline content
+func (l *LibrariesAPI) getOfflineLibraries() ([]Item, error) {
+	// Create a single "Downloaded Content" library
+	offlineLibrary := &SimpleItem{
+		Name:     "Downloaded Content 💾",
+		ID:       "offline-library",
+		IsFolder: true,
+		Type:     "CollectionFolder",
+	}
+	
+	return []Item{offlineLibrary}, nil
 }
 
 // GetByName finds a library by its name and returns its ID

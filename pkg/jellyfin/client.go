@@ -18,6 +18,7 @@ type Client struct {
 	Items     *ItemsAPI
 	Playback  *PlaybackAPI
 	Search    *SearchAPI
+	Download  *DownloadAPI
 }
 
 // Config holds the client configuration
@@ -71,6 +72,7 @@ func NewClient(config *Config) *Client {
 	client.Items = &ItemsAPI{client: client}
 	client.Playback = &PlaybackAPI{client: client}
 	client.Search = &SearchAPI{client: client}
+	client.Download = &DownloadAPI{client: client}
 
 	return client
 }

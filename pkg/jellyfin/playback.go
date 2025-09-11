@@ -157,6 +157,20 @@ func (p *PlaybackAPI) GetDownloadURL(itemID string) string {
 		p.client.config.ServerURL, itemID, p.client.config.AccessToken)
 }
 
+// GetPlaybackURL returns the appropriate URL for playback (local file or remote stream)
+// Returns the URL and a boolean indicating if it's a local file
+func (p *PlaybackAPI) GetPlaybackURL(itemID string, item *DetailedItem) (string, bool) {
+	// First check if we have a local copy
+	if item != nil {
+		if localPath, isLocal := p.client.Download.GetLocalVideoPath(item); isLocal {
+			return localPath, true
+		}
+	}
+	
+	// Fall back to remote download URL
+	return p.GetDownloadURL(itemID), false
+}
+
 // MarkWatched marks an item as watched
 func (p *PlaybackAPI) MarkWatched(itemID string) error {
 	if !p.client.IsAuthenticated() {

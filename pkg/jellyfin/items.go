@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // ItemsAPI handles item-related operations
@@ -13,7 +14,13 @@ type ItemsAPI struct {
 }
 
 // Get returns items within a specified parent, optionally including folders
+// Falls back to offline content if in offline mode
 func (i *ItemsAPI) Get(parentID string, includeFolders bool) ([]Item, error) {
+	// If in offline mode, return offline content
+	if i.client.IsOfflineMode() {
+		return i.getOfflineItems(parentID, includeFolders)
+	}
+	
 	if !i.client.IsAuthenticated() {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
@@ -61,7 +68,13 @@ func (i *ItemsAPI) Get(parentID string, includeFolders bool) ([]Item, error) {
 }
 
 // GetDetails returns detailed information about a specific item
+// Falls back to offline item details if in offline mode
 func (i *ItemsAPI) GetDetails(itemID string) (*DetailedItem, error) {
+	// If in offline mode, get offline item details
+	if i.client.IsOfflineMode() {
+		return i.getOfflineItemDetails(itemID)
+	}
+	
 	if !i.client.IsAuthenticated() {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
@@ -358,4 +371,89 @@ func (i *ItemsAPI) GetRecentlyAddedEpisodes() ([]Item, error) {
 	}
 
 	return items, nil
+}
+
+// getOfflineItems returns offline content for a specific parent ID
+func (i *ItemsAPI) getOfflineItems(parentID string, includeFolders bool) ([]Item, error) {
+	if parentID == "offline-library" {
+		// Return all offline content
+		return i.client.Download.DiscoverOfflineContent()
+	} else if strings.HasPrefix(parentID, "offline-series-") {
+		// Get the series name by scanning for a matching series
+		return i.getOfflineSeriesEpisodes(parentID)
+	}
+	
+	// Unknown parent ID
+	return []Item{}, nil
+}
+
+// getOfflineSeriesEpisodes finds episodes for a series by matching the ID
+func (i *ItemsAPI) getOfflineSeriesEpisodes(seriesID string) ([]Item, error) {
+	// First discover all content to find the matching series
+	allContent, err := i.client.Download.DiscoverOfflineContent()
+	if err != nil {
+		return nil, err
+	}
+	
+	// Find the series with matching ID
+	var targetSeriesName string
+	for _, item := range allContent {
+		if item.GetID() == seriesID && item.GetIsFolder() {
+			targetSeriesName = item.GetName()
+			break
+		}
+	}
+	
+	if targetSeriesName == "" {
+		return []Item{}, nil // Series not found
+	}
+	
+	// Now get episodes for this series
+	return i.client.Download.GetOfflineEpisodes(targetSeriesName)
+}
+
+// getOfflineItemDetails returns details for an offline item
+func (i *ItemsAPI) getOfflineItemDetails(itemID string) (*DetailedItem, error) {
+	// Check if it's the main offline library container
+	if itemID == "offline-library" {
+		return &DetailedItem{
+			SimpleItem: SimpleItem{
+				ID:   "offline-library",
+				Name: "Downloaded Content 💾",
+				Type: "CollectionFolder",
+			},
+			Overview: "Downloaded content available for offline viewing",
+		}, nil
+	}
+	
+	// Check if its a series (folder)
+	if strings.HasPrefix(itemID, "offline-series-") {
+		// Find the series by ID from all content
+		allContent, err := i.client.Download.DiscoverOfflineContent()
+		if err != nil {
+			return nil, err
+		}
+		
+		// Find the series with matching ID
+		for _, item := range allContent {
+			if item.GetID() == itemID && item.GetIsFolder() {
+				detailedItem := item.(*DetailedItem)
+				detailedItem.Overview = "Downloaded series - available offline"
+				return detailedItem, nil
+			}
+		}
+		
+		return nil, fmt.Errorf("offline series not found")
+	}
+	
+	// Check if its a specific video file
+	item, _, err := i.client.Download.GetOfflineItemByID(itemID)
+	if err != nil {
+		return nil, fmt.Errorf("offline item not found: %w", err)
+	}
+	
+	// Add offline-specific overview
+	item.Overview = "Downloaded content - available offline"
+	
+	return item, nil
 }

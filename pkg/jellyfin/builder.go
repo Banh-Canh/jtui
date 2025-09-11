@@ -102,13 +102,52 @@ func (b *ClientBuilder) BuildAndConnect() (*Client, error) {
 }
 
 // ConnectFromConfig creates a client from external configuration (like viper)
+// Falls back to offline mode if server is unavailable
 func ConnectFromConfig(getConfigString func(key string) string) (*Client, error) {
 	serverURL := getConfigString("jellyfin.server_url")
 	if serverURL == "" {
 		return nil, fmt.Errorf("jellyfin.server_url must be configured")
 	}
 
-	return NewClientBuilder().
+	// Try to connect normally first
+	client, err := NewClientBuilder().
 		WithServerURL(serverURL).
 		BuildAndConnect()
+	
+	if err != nil {
+		// If server connection fails, try offline mode
+		return CreateOfflineClient(serverURL)
+	}
+	
+	return client, nil
+}
+
+// CreateOfflineClient creates a client that works only with offline content
+func CreateOfflineClient(serverURL string) (*Client, error) {
+	config := &Config{
+		ServerURL:  serverURL,
+		ClientName: "jtui-offline",
+		Version:    "1.0.0",
+		Timeout:    10 * time.Second,
+		// No AccessToken or UserID - indicates offline mode
+	}
+
+	client := NewClient(config)
+	
+	// Check if we have any offline content
+	offlineItems, err := client.Download.DiscoverOfflineContent()
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover offline content: %w", err)
+	}
+	
+	if len(offlineItems) == 0 {
+		return nil, fmt.Errorf("no server connection and no offline content available")
+	}
+	
+	return client, nil
+}
+
+// IsOfflineMode checks if the client is running in offline mode
+func (c *Client) IsOfflineMode() bool {
+	return c.config.AccessToken == "" && c.config.UserID == ""
 }
