@@ -1,12 +1,17 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -106,19 +111,29 @@ var (
 )
 
 func Menu() {
+	// Setup cleanup on exit
+	setupCleanupHandlers()
+	
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		// UI errors are typically not critical, just exit gracefully
+		CleanupMpvProcesses()
 		os.Exit(1)
 	}
+	CleanupMpvProcesses()
 }
 
 func MenuWithClient(client *jellyfin.Client) {
+	// Setup cleanup on exit
+	setupCleanupHandlers()
+	
 	p := tea.NewProgram(initialModelWithClient(client), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		// UI errors are typically not critical, just exit gracefully
+		CleanupMpvProcesses()
 		os.Exit(1)
 	}
+	CleanupMpvProcesses()
 }
 
 func initialModel() model {
@@ -512,9 +527,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, openThumbnail(m.client, m.currentDetails)
 			}
 		case "p", " ":
-			// Play item
+			// Play item from beginning
 			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() {
-				return m, playItem(m.client, m.items[m.cursor].GetID())
+				return m, playItem(m.client, m.items[m.cursor].GetID(), 0) // Start from beginning
+			}
+		case "r":
+			// Resume item from saved position
+			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil && m.currentDetails.HasResumePosition() {
+				resumePosition := m.currentDetails.GetPlaybackPositionTicks()
+				return m, playItem(m.client, m.items[m.cursor].GetID(), resumePosition)
 			}
 		case "w":
 			// Toggle watched status
@@ -561,33 +582,132 @@ func (m model) selectItem() (model, tea.Cmd) {
 		m.loading = true
 		return m, loadItems(m.client, item.GetID(), true) // Include folders for navigation
 	} else {
-		// It's a media file, play it
-		return m, playItem(m.client, item.GetID())
+		// It's a media file, check if it has resume position
+		if m.currentDetails != nil && m.currentDetails.HasResumePosition() {
+			// Resume from saved position
+			resumePosition := m.currentDetails.GetPlaybackPositionTicks()
+			return m, playItem(m.client, item.GetID(), resumePosition)
+		} else {
+			// Play from beginning
+			return m, playItem(m.client, item.GetID(), 0)
+		}
 	}
 }
 
-func playItem(client *jellyfin.Client, itemID string) tea.Cmd {
+// Global variable to track running mpv processes
+var runningMpvProcesses []*exec.Cmd
+
+func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) tea.Cmd {
 	return func() tea.Msg {
 		// Get download URL for full video file (better mpv control)
 		streamURL := client.Playback.GetDownloadURL(itemID)
 		
-		// Launch mpv with the stream URL
-		cmd := exec.Command("mpv", streamURL)
+		// Prepare mpv command with JSON IPC enabled for position tracking
+		args := []string{"--input-ipc-server=/tmp/mpvsocket"}
+		
+		// Add start position if resuming
+		if startPositionTicks > 0 {
+			// Convert ticks to seconds for mpv (1 tick = 100 nanoseconds)
+			startSeconds := float64(startPositionTicks) / 10000000.0
+			args = append(args, fmt.Sprintf("--start=%.2f", startSeconds))
+		}
+		
+		args = append(args, streamURL)
+		cmd := exec.Command("mpv", args...)
+		
+		// Add to global tracking so we can kill it on exit
+		runningMpvProcesses = append(runningMpvProcesses, cmd)
 		
 		// Start playback tracking in background
 		go func() {
 			// Report playback start
 			client.Playback.ReportStart(itemID)
 			
+			// Channel to stop progress reporting when mpv exits
+			done := make(chan bool)
+			
+			// Start continuous progress reporting goroutine
+			go func() {
+				ticker := time.NewTicker(5 * time.Second) // Report every 5 seconds
+				defer ticker.Stop()
+				
+				for {
+					select {
+					case <-done:
+						return
+					case <-ticker.C:
+						if position := getMpvPosition(); position > 0 {
+							// Convert seconds to ticks (1 tick = 100 nanoseconds)
+							positionTicks := int64(position * 10000000)
+							// Continuously sync progress to server
+							client.Playback.ReportProgress(itemID, positionTicks)
+						}
+					}
+				}
+			}()
+			
 			// Run mpv and wait for completion
 			cmd.Run()
 			
-			// Report playback stop (mark as watched)
-			client.Playback.ReportStop(itemID, 0)
+			// Signal progress reporting to stop
+			close(done)
+			
+			// Remove from tracking list when mpv exits
+			for i, p := range runningMpvProcesses {
+				if p == cmd {
+					runningMpvProcesses = append(runningMpvProcesses[:i], runningMpvProcesses[i+1:]...)
+					break
+				}
+			}
+			
+			// Send final progress update
+			if finalPosition := getMpvPosition(); finalPosition > 0 {
+				finalPositionTicks := int64(finalPosition * 10000000)
+				client.Playback.ReportProgress(itemID, finalPositionTicks)
+			}
 		}()
 		
 		return nil
 	}
+}
+
+// getMpvPosition retrieves current playback position from mpv via JSON IPC
+func getMpvPosition() float64 {
+	conn, err := net.Dial("unix", "/tmp/mpvsocket")
+	if err != nil {
+		return 0
+	}
+	defer conn.Close()
+	
+	// Send command to get playback position
+	command := map[string]interface{}{
+		"command": []string{"get_property", "time-pos"},
+	}
+	
+	jsonData, err := json.Marshal(command)
+	if err != nil {
+		return 0
+	}
+	
+	conn.Write(append(jsonData, '\n'))
+	
+	// Read response
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return 0
+	}
+	
+	var response map[string]interface{}
+	if err := json.Unmarshal(buffer[:n], &response); err != nil {
+		return 0
+	}
+	
+	if data, ok := response["data"].(float64); ok {
+		return data
+	}
+	
+	return 0
 }
 
 func openThumbnail(client *jellyfin.Client, details *jellyfin.DetailedItem) tea.Cmd {
@@ -977,9 +1097,11 @@ func (m model) renderDetails(width, height int) string {
 		}
 	} else if m.currentDetails.HasResumePosition() {
 		percentage := int(m.currentDetails.GetPlayedPercentage())
-		details.WriteString(dimStyle.Render(fmt.Sprintf("⏸️ Resume at %d%%", percentage)))
+		details.WriteString(infoStyle.Render(fmt.Sprintf("⏸️ Resume at %d%%", percentage)))
 		details.WriteString("\n")
-		linesUsed++
+		details.WriteString(dimStyle.Render("  Press 'r' to resume, 'p' to restart"))
+		details.WriteString("\n")
+		linesUsed += 2
 		if linesUsed >= maxLines {
 			return details.String()
 		}
@@ -1025,15 +1147,38 @@ func (m model) renderDetails(width, height int) string {
 	return details.String()
 }
 
+// CleanupMpvProcesses kills any running mpv processes when jtui exits
+func CleanupMpvProcesses() {
+	for _, cmd := range runningMpvProcesses {
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	}
+	runningMpvProcesses = nil
+}
+
+// setupCleanupHandlers sets up signal handlers to cleanup mpv processes on exit
+func setupCleanupHandlers() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	
+	go func() {
+		<-c
+		CleanupMpvProcesses()
+		os.Exit(0)
+	}()
+}
+
 // Pre-allocated help text to reduce allocations
 var helpText = strings.Join([]string{
 	"↑↓/jk: navigate",
 	"←→/PgUp/PgDn: page",
 	"g/G: top/bottom",
-	"Enter: select/play",
+	"Enter: select/resume",
 	"h/Bksp: back",
 	"t: thumbnail",
 	"p/Space: play",
+	"r: resume",
 	"w: toggle watched",
 	"/: search",
 	"q: quit",
