@@ -120,6 +120,10 @@ type playbackProgressMsg struct {
 
 type playbackStoppedMsg struct{}
 
+type videoCompletedMsg struct {
+	itemID string
+}
+
 type stopPlaybackMsg struct{}
 
 type togglePauseMsg struct{}
@@ -192,6 +196,7 @@ func Menu() {
 	go cleanupYaziCache()
 
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	globalProgram = p // Store reference for background goroutines
 	if _, err := p.Run(); err != nil {
 		// UI errors are typically not critical, just exit gracefully
 		CleanupMpvProcesses()
@@ -208,6 +213,7 @@ func MenuWithClient(client *jellyfin.Client) {
 	go cleanupYaziCache()
 
 	p := tea.NewProgram(initialModelWithClient(client), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	globalProgram = p // Store reference for background goroutines
 	if _, err := p.Run(); err != nil {
 		// UI errors are typically not critical, just exit gracefully
 		CleanupMpvProcesses()
@@ -610,14 +616,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasPlaying := m.isVideoPlaying
 		m.isVideoPlaying = msg.isPlaying
 
+		// If we're getting progress data but don't have a current playing item set,
+		// try to set it from current selection (handles edge cases)
+		if msg.isPlaying && m.currentPlayingItem == nil && m.currentDetails != nil {
+			m.currentPlayingItem = m.currentDetails
+		}
+
 		if !msg.isPlaying && wasPlaying {
 			// Video stopped, clear the current playing item
 			m.currentPlayingItem = nil
 			m.currentPlayPosition = 0
 			m.currentPlayDuration = 0
 		}
-		// Continue updating progress only if something is playing or we just detected playback
-		if msg.isPlaying || wasPlaying {
+		
+		// Additional check: if we think we have a playing item but can't connect to mpv,
+		// the video has probably ended
+		if m.currentPlayingItem != nil && !msg.isPlaying && msg.position == 0 && msg.duration == 0 {
+			// mpv socket is likely gone - video ended
+			m.currentPlayingItem = nil
+			m.isVideoPlaying = false
+			m.currentPlayPosition = 0
+			m.currentPlayDuration = 0
+		}
+		
+		// Continue updating progress if:
+		// 1. Something is currently playing
+		// 2. Something was just playing (to detect stop)
+		// 3. We have a currentPlayingItem set (shows progress bar even if detection is flaky)
+		if msg.isPlaying || wasPlaying || m.currentPlayingItem != nil {
 			return m, createProgressUpdateCmd()
 		}
 		return m, nil
@@ -627,6 +653,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentPlayingItem = nil
 		m.currentPlayPosition = 0
 		m.currentPlayDuration = 0
+		return m, nil
+
+	case videoCompletedMsg:
+		// Mark the video as watched in the UI
+		if m.currentDetails != nil && m.currentDetails.GetID() == msg.itemID {
+			m.currentDetails.UserData.Played = true
+			m.currentDetails.UserData.PlayCount = 1
+			m.currentDetails.UserData.PlaybackPositionTicks = 0
+		}
+
+		// Also update the item in the items list
+		for i, item := range m.items {
+			if item.GetID() == msg.itemID {
+				if detailedItem, ok := item.(jellyfin.DetailedItem); ok {
+					detailedItem.UserData.Played = true
+					detailedItem.UserData.PlayCount = 1
+					detailedItem.UserData.PlaybackPositionTicks = 0
+					m.items[i] = detailedItem
+					break
+				}
+			}
+		}
 		return m, nil
 
 	case stopPlaybackMsg:
@@ -813,7 +861,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentPlayingItem = m.currentDetails
 				return m, tea.Batch(
 					playItem(m.client, m.items[m.cursor].GetID(), 0),
-					createProgressUpdateCmd(),
+					createDelayedProgressUpdateCmd(),
 				)
 			}
 		case "r":
@@ -823,7 +871,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentPlayingItem = m.currentDetails
 				return m, tea.Batch(
 					playItem(m.client, m.items[m.cursor].GetID(), resumePosition),
-					createProgressUpdateCmd(),
+					createDelayedProgressUpdateCmd(),
 				)
 			}
 		case "w":
@@ -924,14 +972,14 @@ func (m model) selectItem() (model, tea.Cmd) {
 			m.currentPlayingItem = m.currentDetails
 			return m, tea.Batch(
 				playItem(m.client, item.GetID(), resumePosition),
-				createProgressUpdateCmd(),
+				createDelayedProgressUpdateCmd(),
 			)
 		} else {
 			// Play from beginning
 			m.currentPlayingItem = m.currentDetails
 			return m, tea.Batch(
 				playItem(m.client, item.GetID(), 0),
-				createProgressUpdateCmd(),
+				createDelayedProgressUpdateCmd(),
 			)
 		}
 	}
@@ -942,6 +990,9 @@ var runningMpvProcesses []*exec.Cmd
 
 // Global variable to track current image for cleanup
 var globalImageArea *imageArea
+
+// Global program reference to send messages from background goroutines
+var globalProgram *tea.Program
 
 // Shared HTTP client for image downloads to improve performance
 var imageDownloadClient *http.Client
@@ -1062,11 +1113,35 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 				}
 			}
 
-			// Send final progress update (only for remote content)
-			if !isLocal {
-				if finalPosition := getMpvPosition(); finalPosition > 0 {
-					finalPositionTicks := int64(finalPosition * 10000000)
+			// Handle completion for both local and remote content
+			if finalPosition := getMpvPosition(); finalPosition > 0 {
+				finalPositionTicks := int64(finalPosition * 10000000)
+				
+				// For remote content, report progress to server
+				if !isLocal {
 					client.Playback.ReportProgress(itemID, finalPositionTicks)
+				}
+				
+				// Check if video was completed (watched >90% of duration)
+				if finalDuration := getMpvDuration(); finalDuration > 0 {
+					completionPercentage := (finalPosition / finalDuration) * 100
+					if completionPercentage >= 90.0 {
+						// Mark as watched (for both local and remote)
+						if !isLocal {
+							client.Playback.MarkWatched(itemID)
+							client.Playback.ReportStop(itemID, finalPositionTicks)
+						} else {
+							// For local content, still mark as watched on server if authenticated
+							if client.IsAuthenticated() {
+								client.Playback.MarkWatched(itemID)
+							}
+						}
+						
+						// Send completion message to UI if program reference is available
+						if globalProgram != nil {
+							globalProgram.Send(videoCompletedMsg{itemID: itemID})
+						}
+					}
 				}
 			}
 		}()
@@ -1114,6 +1189,65 @@ func getMpvPosition() float64 {
 	return 0
 }
 
+// getMpvPositionWithRetry retrieves current playback position with retry logic
+func getMpvPositionWithRetry() float64 {
+	for retry := 0; retry < 2; retry++ {
+		conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+		if err != nil {
+			if retry < 1 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			return 0
+		}
+		defer conn.Close()
+
+		conn.SetDeadline(time.Now().Add(300 * time.Millisecond))
+
+		// Send command to get playback position
+		command := map[string]interface{}{
+			"command": []string{"get_property", "time-pos"},
+		}
+
+		jsonData, err := json.Marshal(command)
+		if err != nil {
+			if retry < 1 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			return 0
+		}
+
+		conn.Write(append(jsonData, '\n'))
+
+		// Read response
+		buffer := make([]byte, 1024)
+		n, err := conn.Read(buffer)
+		if err != nil {
+			if retry < 1 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			return 0
+		}
+
+		var response map[string]interface{}
+		if err := json.Unmarshal(buffer[:n], &response); err != nil {
+			if retry < 1 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			return 0
+		}
+
+		if data, ok := response["data"].(float64); ok {
+			return data
+		}
+	}
+
+	return 0
+}
+
 // getMpvDuration retrieves total duration from mpv via JSON IPC
 func getMpvDuration() float64 {
 	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
@@ -1148,6 +1282,65 @@ func getMpvDuration() float64 {
 
 	if data, ok := response["data"].(float64); ok {
 		return data
+	}
+
+	return 0
+}
+
+// getMpvDurationWithRetry retrieves total duration with retry logic
+func getMpvDurationWithRetry() float64 {
+	for retry := 0; retry < 2; retry++ {
+		conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+		if err != nil {
+			if retry < 1 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			return 0
+		}
+		defer conn.Close()
+
+		conn.SetDeadline(time.Now().Add(300 * time.Millisecond))
+
+		// Send command to get duration
+		command := map[string]interface{}{
+			"command": []string{"get_property", "duration"},
+		}
+
+		jsonData, err := json.Marshal(command)
+		if err != nil {
+			if retry < 1 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			return 0
+		}
+
+		conn.Write(append(jsonData, '\n'))
+
+		// Read response
+		buffer := make([]byte, 1024)
+		n, err := conn.Read(buffer)
+		if err != nil {
+			if retry < 1 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			return 0
+		}
+
+		var response map[string]interface{}
+		if err := json.Unmarshal(buffer[:n], &response); err != nil {
+			if retry < 1 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			return 0
+		}
+
+		if data, ok := response["data"].(float64); ok {
+			return data
+		}
 	}
 
 	return 0
@@ -1335,47 +1528,89 @@ func cycleAudioTrack() error {
 	return nil
 }
 
-// checkMpvStatus checks if mpv is running and returns current status
+// checkMpvStatus checks if mpv is running and returns current status with retry logic
 func checkMpvStatus() (position, duration float64, isPlaying bool) {
-	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-	if err != nil {
-		return 0, 0, false
+	// Try multiple times with short delays to account for mpv startup time
+	maxRetries := 3
+	for retry := 0; retry < maxRetries; retry++ {
+		conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+		if err != nil {
+			if retry < maxRetries-1 {
+				time.Sleep(100 * time.Millisecond) // Brief delay before retry
+				continue
+			}
+			return 0, 0, false
+		}
+		defer conn.Close()
+
+		// Set a timeout for the socket operations
+		conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+
+		// First check if mpv is paused
+		pauseCommand := map[string]interface{}{
+			"command": []string{"get_property", "pause"},
+		}
+
+		jsonData, err := json.Marshal(pauseCommand)
+		if err != nil {
+			if retry < maxRetries-1 {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			return 0, 0, false
+		}
+
+		conn.Write(append(jsonData, '\n'))
+
+		buffer := make([]byte, 1024)
+		n, err := conn.Read(buffer)
+		if err != nil {
+			if retry < maxRetries-1 {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			return 0, 0, false
+		}
+
+		var pauseResponse map[string]interface{}
+		if err := json.Unmarshal(buffer[:n], &pauseResponse); err != nil {
+			if retry < maxRetries-1 {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			return 0, 0, false
+		}
+
+		isPaused, pauseOk := pauseResponse["data"].(bool)
+		position = getMpvPositionWithRetry()
+		duration = getMpvDurationWithRetry()
+
+		// Video is considered playing if:
+		// 1. We can get pause status and it's not paused, OR
+		// 2. We have valid position/duration data (even if pause check failed)
+		videoIsPlaying := (!isPaused && pauseOk) || (position > 0 || duration > 0)
+		
+		return position, duration, videoIsPlaying
 	}
-	defer conn.Close()
-
-	// First check if mpv is paused
-	pauseCommand := map[string]interface{}{
-		"command": []string{"get_property", "pause"},
-	}
-
-	jsonData, err := json.Marshal(pauseCommand)
-	if err != nil {
-		return 0, 0, false
-	}
-
-	conn.Write(append(jsonData, '\n'))
-
-	buffer := make([]byte, 1024)
-	n, err := conn.Read(buffer)
-	if err != nil {
-		return 0, 0, false
-	}
-
-	var pauseResponse map[string]interface{}
-	if err := json.Unmarshal(buffer[:n], &pauseResponse); err != nil {
-		return 0, 0, false
-	}
-
-	isPaused, _ := pauseResponse["data"].(bool)
-	position = getMpvPosition()
-	duration = getMpvDuration()
-
-	return position, duration, !isPaused && position >= 0
+	
+	return 0, 0, false
 }
 
 // createProgressUpdateCmd creates a command that periodically updates playback progress
 func createProgressUpdateCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		position, duration, isPlaying := checkMpvStatus()
+		return playbackProgressMsg{
+			position:  position,
+			duration:  duration,
+			isPlaying: isPlaying,
+		}
+	})
+}
+
+// createDelayedProgressUpdateCmd creates a command with initial delay for mpv startup
+func createDelayedProgressUpdateCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		position, duration, isPlaying := checkMpvStatus()
 		return playbackProgressMsg{
 			position:  position,
