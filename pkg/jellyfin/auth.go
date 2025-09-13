@@ -358,7 +358,7 @@ func (a *AuthAPI) SaveSession() error {
 	}
 
 	sessionDir := filepath.Join(xdg.CacheHome, a.client.config.ClientName)
-	if err := os.MkdirAll(sessionDir, 0700); err != nil {
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 		return fmt.Errorf("failed to create session directory: %v", err)
 	}
 
@@ -373,7 +373,7 @@ func (a *AuthAPI) SaveSession() error {
 	}
 
 	sessionFile := filepath.Join(sessionDir, "session.txt")
-	return os.WriteFile(sessionFile, jsonData, 0600)
+	return os.WriteFile(sessionFile, jsonData, 0o600)
 }
 
 // validateAndUpdateSession validates old sessions and gets the user ID

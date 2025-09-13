@@ -20,7 +20,7 @@ func (i *ItemsAPI) Get(parentID string, includeFolders bool) ([]Item, error) {
 	if i.client.IsOfflineMode() {
 		return i.getOfflineItems(parentID, includeFolders)
 	}
-	
+
 	if !i.client.IsAuthenticated() {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
@@ -74,7 +74,7 @@ func (i *ItemsAPI) GetDetails(itemID string) (*DetailedItem, error) {
 	if i.client.IsOfflineMode() {
 		return i.getOfflineItemDetails(itemID)
 	}
-	
+
 	if !i.client.IsAuthenticated() {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
@@ -83,7 +83,12 @@ func (i *ItemsAPI) GetDetails(itemID string) (*DetailedItem, error) {
 		return nil, fmt.Errorf("userID not set - authentication may have failed")
 	}
 
-	url := fmt.Sprintf("%s/Users/%s/Items/%s?Fields=BasicSyncInfo,UserData,SeriesInfo", i.client.config.ServerURL, i.client.config.UserID, itemID)
+	url := fmt.Sprintf(
+		"%s/Users/%s/Items/%s?Fields=BasicSyncInfo,UserData,SeriesInfo",
+		i.client.config.ServerURL,
+		i.client.config.UserID,
+		itemID,
+	)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -118,7 +123,7 @@ func (i *ItemsAPI) GetImageURL(itemID, imageType, tag string) string {
 	if tag == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s/Items/%s/Images/%s?tag=%s&quality=90&maxWidth=300", 
+	return fmt.Sprintf("%s/Items/%s/Images/%s?tag=%s&quality=90&maxWidth=300",
 		i.client.config.ServerURL, itemID, imageType, tag)
 }
 
@@ -128,16 +133,25 @@ func (i *ItemsAPI) GetResumeItems() ([]Item, error) {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
 
-	url := fmt.Sprintf("%s/Users/%s/Items/Resume?Limit=12&Recursive=true&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1", 
-		i.client.config.ServerURL, i.client.config.UserID)
+	url := fmt.Sprintf(
+		"%s/Users/%s/Items/Resume?Limit=12&Recursive=true&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
+		i.client.config.ServerURL,
+		i.client.config.UserID,
+	)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		i.client.config.ClientName, i.client.config.ClientName, i.client.config.DeviceID, i.client.config.Version, i.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		i.client.config.ClientName,
+		i.client.config.ClientName,
+		i.client.config.DeviceID,
+		i.client.config.Version,
+		i.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := i.client.http.Do(req)
@@ -170,16 +184,25 @@ func (i *ItemsAPI) GetNextUp() ([]Item, error) {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
 
-	url := fmt.Sprintf("%s/Shows/NextUp?UserId=%s&Limit=12&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1", 
-		i.client.config.ServerURL, i.client.config.UserID)
+	url := fmt.Sprintf(
+		"%s/Shows/NextUp?UserId=%s&Limit=12&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
+		i.client.config.ServerURL,
+		i.client.config.UserID,
+	)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		i.client.config.ClientName, i.client.config.ClientName, i.client.config.DeviceID, i.client.config.Version, i.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		i.client.config.ClientName,
+		i.client.config.ClientName,
+		i.client.config.DeviceID,
+		i.client.config.Version,
+		i.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := i.client.http.Do(req)
@@ -219,8 +242,14 @@ func (i *ItemsAPI) GetAncestors(itemID string) ([]Item, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		i.client.config.ClientName, i.client.config.ClientName, i.client.config.DeviceID, i.client.config.Version, i.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		i.client.config.ClientName,
+		i.client.config.ClientName,
+		i.client.config.DeviceID,
+		i.client.config.Version,
+		i.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := i.client.http.Do(req)
@@ -253,16 +282,25 @@ func (i *ItemsAPI) GetRecentlyAddedMovies() ([]Item, error) {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
 
-	url := fmt.Sprintf("%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Movie&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1", 
-		i.client.config.ServerURL, i.client.config.UserID)
+	url := fmt.Sprintf(
+		"%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Movie&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
+		i.client.config.ServerURL,
+		i.client.config.UserID,
+	)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		i.client.config.ClientName, i.client.config.ClientName, i.client.config.DeviceID, i.client.config.Version, i.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		i.client.config.ClientName,
+		i.client.config.ClientName,
+		i.client.config.DeviceID,
+		i.client.config.Version,
+		i.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := i.client.http.Do(req)
@@ -295,16 +333,25 @@ func (i *ItemsAPI) GetRecentlyAddedShows() ([]Item, error) {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
 
-	url := fmt.Sprintf("%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Series&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1", 
-		i.client.config.ServerURL, i.client.config.UserID)
+	url := fmt.Sprintf(
+		"%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Series&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
+		i.client.config.ServerURL,
+		i.client.config.UserID,
+	)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		i.client.config.ClientName, i.client.config.ClientName, i.client.config.DeviceID, i.client.config.Version, i.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		i.client.config.ClientName,
+		i.client.config.ClientName,
+		i.client.config.DeviceID,
+		i.client.config.Version,
+		i.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := i.client.http.Do(req)
@@ -337,16 +384,25 @@ func (i *ItemsAPI) GetRecentlyAddedEpisodes() ([]Item, error) {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
 
-	url := fmt.Sprintf("%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Episode&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1", 
-		i.client.config.ServerURL, i.client.config.UserID)
+	url := fmt.Sprintf(
+		"%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Episode&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
+		i.client.config.ServerURL,
+		i.client.config.UserID,
+	)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		i.client.config.ClientName, i.client.config.ClientName, i.client.config.DeviceID, i.client.config.Version, i.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		i.client.config.ClientName,
+		i.client.config.ClientName,
+		i.client.config.DeviceID,
+		i.client.config.Version,
+		i.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := i.client.http.Do(req)
@@ -382,7 +438,7 @@ func (i *ItemsAPI) getOfflineItems(parentID string, includeFolders bool) ([]Item
 		// Get the series name by scanning for a matching series
 		return i.getOfflineSeriesEpisodes(parentID)
 	}
-	
+
 	// Unknown parent ID
 	return []Item{}, nil
 }
@@ -394,7 +450,7 @@ func (i *ItemsAPI) getOfflineSeriesEpisodes(seriesID string) ([]Item, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Find the series with matching ID
 	var targetSeriesName string
 	for _, item := range allContent {
@@ -403,11 +459,11 @@ func (i *ItemsAPI) getOfflineSeriesEpisodes(seriesID string) ([]Item, error) {
 			break
 		}
 	}
-	
+
 	if targetSeriesName == "" {
 		return []Item{}, nil // Series not found
 	}
-	
+
 	// Now get episodes for this series
 	return i.client.Download.GetOfflineEpisodes(targetSeriesName)
 }
@@ -425,7 +481,7 @@ func (i *ItemsAPI) getOfflineItemDetails(itemID string) (*DetailedItem, error) {
 			Overview: "Downloaded content available for offline viewing",
 		}, nil
 	}
-	
+
 	// Check if its a series (folder)
 	if strings.HasPrefix(itemID, "offline-series-") {
 		// Find the series by ID from all content
@@ -433,7 +489,7 @@ func (i *ItemsAPI) getOfflineItemDetails(itemID string) (*DetailedItem, error) {
 		if err != nil {
 			return nil, err
 		}
-		
+
 		// Find the series with matching ID
 		for _, item := range allContent {
 			if item.GetID() == itemID && item.GetIsFolder() {
@@ -442,18 +498,18 @@ func (i *ItemsAPI) getOfflineItemDetails(itemID string) (*DetailedItem, error) {
 				return detailedItem, nil
 			}
 		}
-		
+
 		return nil, fmt.Errorf("offline series not found")
 	}
-	
+
 	// Check if its a specific video file
 	item, _, err := i.client.Download.GetOfflineItemByID(itemID)
 	if err != nil {
 		return nil, fmt.Errorf("offline item not found: %w", err)
 	}
-	
+
 	// Add offline-specific overview
 	item.Overview = "Downloaded content - available offline"
-	
+
 	return item, nil
 }

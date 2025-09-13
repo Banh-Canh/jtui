@@ -19,7 +19,7 @@ func (l *LibrariesAPI) GetAll() ([]Item, error) {
 	if l.client.IsOfflineMode() {
 		return l.getOfflineLibraries()
 	}
-	
+
 	if !l.client.IsAuthenticated() {
 		return nil, fmt.Errorf("client is not authenticated")
 	}
@@ -72,7 +72,7 @@ func (l *LibrariesAPI) getOfflineLibraries() ([]Item, error) {
 		IsFolder: true,
 		Type:     "CollectionFolder",
 	}
-	
+
 	return []Item{offlineLibrary}, nil
 }
 

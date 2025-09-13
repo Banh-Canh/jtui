@@ -18,7 +18,7 @@ A fast, efficient TUI (Terminal User Interface) for browsing and navigating your
 - 🚀 Fast and responsive terminal interface
 - 📚 Browse your entire Jellyfin media library
 - 🔍 Quick search functionality
-- ▶️ Direct media playback with mpv
+- ▶️ **Complete media playback controls (play/pause/stop/resume/subtitle/audio tracks)**
 - 💾 **Download videos for offline viewing**
 - 🔌 **Automatic offline mode when server unavailable**
 - 📊 Continue watching and next up sections
@@ -146,7 +146,11 @@ JTUI supports both arrow keys and Vim-style navigation:
 | `PgUp` / `PgDn` | Page up/down |
 | `g` / `G` | Jump to top/bottom |
 | `Enter` | Select item or play media |
-| `Space` / `p` | Play selected media |
+| `Space` / `p` | **Play/pause toggle (when video playing), or play selected media** |
+| `r` | Resume from saved position |
+| `s` | **Stop video playback** |
+| `u` | **Cycle subtitle tracks (during playback)** |
+| `a` | **Cycle audio tracks (during playback)** |
 | `t` | View thumbnail |
 | `w` | Toggle watched status |
 | `d` | **Download video for offline viewing** |
@@ -172,9 +176,15 @@ JTUI supports both arrow keys and Vim-style navigation:
 - Press `Escape` to exit search mode
 
 #### Media Playback
-- Press `Space` or `p` to play media files
+- **Play/Pause**: Press `Space` or `p` to play media files, or toggle pause/play during playback
+- **Resume**: Press `r` to resume from your saved position
+- **Stop**: Press `s` to completely stop video playback
+- **Subtitle Tracks**: Press `u` to cycle through available subtitle tracks during playback
+- **Audio Tracks**: Press `a` to cycle through available audio tracks during playback
+- **Smart Playback**: Press `Enter` to intelligently resume from saved position or play from beginning
 - Requires `mpv` to be installed and in your PATH
 - Playback is tracked automatically in Jellyfin
+- Real-time progress bar displayed during playback
 
 #### Download & Offline Features
 - **Download Videos**: Press `d` on any video to download it for offline viewing

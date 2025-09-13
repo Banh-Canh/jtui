@@ -11,7 +11,7 @@ import (
 type Client struct {
 	config *Config
 	http   *http.Client
-	
+
 	// API modules
 	Auth      *AuthAPI
 	Libraries *LibrariesAPI

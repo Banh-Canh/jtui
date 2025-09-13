@@ -57,16 +57,28 @@ func (s *SearchAPI) Items(options *SearchOptions) ([]Item, error) {
 		return nil, fmt.Errorf("search query cannot be empty")
 	}
 
-	searchURL := fmt.Sprintf("%s/Users/%s/Items?searchTerm=%s&Recursive=%t&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1&Limit=%d",
-		s.client.config.ServerURL, s.client.config.UserID, url.QueryEscape(options.Query), options.Recursive, options.Limit)
+	searchURL := fmt.Sprintf(
+		"%s/Users/%s/Items?searchTerm=%s&Recursive=%t&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1&Limit=%d",
+		s.client.config.ServerURL,
+		s.client.config.UserID,
+		url.QueryEscape(options.Query),
+		options.Recursive,
+		options.Limit,
+	)
 
 	req, err := http.NewRequest("GET", searchURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		s.client.config.ClientName, s.client.config.ClientName, s.client.config.DeviceID, s.client.config.Version, s.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		s.client.config.ClientName,
+		s.client.config.ClientName,
+		s.client.config.DeviceID,
+		s.client.config.Version,
+		s.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.client.http.Do(req)

@@ -14,7 +14,7 @@ var Logger *zap.Logger
 func InitializeLogger(logLevel zapcore.Level, logFilePath string) {
 	// Create all necessary directories for the log file
 	dir := filepath.Dir(logFilePath)
-	if err := os.MkdirAll(dir, 0755); err != nil { // More restrictive permissions
+	if err := os.MkdirAll(dir, 0o755); err != nil { // More restrictive permissions
 		panic(fmt.Sprintf("Failed to create log directory: %v", err))
 	}
 
@@ -40,9 +40,9 @@ func InitializeLogger(logLevel zapcore.Level, logFilePath string) {
 			Initial:    100,
 			Thereafter: 100,
 		},
-		Encoding:      "json",
-		EncoderConfig: encoderConfig,
-		OutputPaths:   []string{logFilePath},
+		Encoding:         "json",
+		EncoderConfig:    encoderConfig,
+		OutputPaths:      []string{logFilePath},
 		ErrorOutputPaths: []string{logFilePath},
 	}
 
@@ -51,7 +51,6 @@ func InitializeLogger(logLevel zapcore.Level, logFilePath string) {
 	if err != nil {
 		panic(fmt.Sprintf("Failed to initialize logger: %v", err))
 	}
-	
 }
 
 // SyncLogger ensures all log entries are flushed

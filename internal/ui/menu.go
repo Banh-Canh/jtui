@@ -14,10 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/blacktop/go-termimg"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/viper"
-	"github.com/blacktop/go-termimg"
 
 	"github.com/Banh-Canh/jtui/pkg/jellyfin"
 )
@@ -52,6 +52,11 @@ type model struct {
 	viewport       int
 	viewportOffset int
 	thumbnailCache map[string]string // Cache for rendered thumbnails
+	// Video playback status
+	currentPlayingItem  *jellyfin.DetailedItem
+	currentPlayPosition float64 // Current position in seconds
+	currentPlayDuration float64 // Total duration in seconds
+	isVideoPlaying      bool
 }
 
 // Messages
@@ -96,38 +101,55 @@ type thumbnailLoadedMsg struct {
 	thumbnail string
 }
 
+type playbackProgressMsg struct {
+	position  float64
+	duration  float64
+	isPlaying bool
+	itemName  string
+}
+
+type playbackStoppedMsg struct{}
+
+type stopPlaybackMsg struct{}
+
+type togglePauseMsg struct{}
+
+type cycleSubtitleMsg struct{}
+
+type cycleAudioMsg struct{}
+
 // Styles
 var (
 	titleStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Background(lipgloss.Color("#7D56F4")).
-		Padding(0, 1).
-		Bold(true)
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#7D56F4")).
+			Padding(0, 1).
+			Bold(true)
 
 	itemStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FAFAFA"))
+			Foreground(lipgloss.Color("#FAFAFA"))
 
 	selectedStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Background(lipgloss.Color("#7D56F4")).
-		Bold(true)
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#7D56F4")).
+			Bold(true)
 
 	dimStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#888888"))
+			Foreground(lipgloss.Color("#888888"))
 
 	infoStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FAFAFA"))
+			Foreground(lipgloss.Color("#FAFAFA"))
 
 	panelStyle = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#444444")).
-		Padding(1)
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#444444")).
+			Padding(1)
 )
 
 func Menu() {
 	// Setup cleanup on exit
 	setupCleanupHandlers()
-	
+
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		// UI errors are typically not critical, just exit gracefully
@@ -140,7 +162,7 @@ func Menu() {
 func MenuWithClient(client *jellyfin.Client) {
 	// Setup cleanup on exit
 	setupCleanupHandlers()
-	
+
 	p := tea.NewProgram(initialModelWithClient(client), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		// UI errors are typically not critical, just exit gracefully
@@ -159,35 +181,43 @@ func initialModel() model {
 	}
 
 	return model{
-		client:         client,
-		currentView:    LibraryView,
-		items:          []jellyfin.Item{},
-		cursor:         0,
-		currentPath:    []pathItem{},
-		currentDetails: nil,
-		loading:        true,
-		width:          80,
-		height:         24,
-		viewport:       15,
-		viewportOffset: 0,
-		thumbnailCache: make(map[string]string),
+		client:              client,
+		currentView:         LibraryView,
+		items:               []jellyfin.Item{},
+		cursor:              0,
+		currentPath:         []pathItem{},
+		currentDetails:      nil,
+		loading:             true,
+		width:               80,
+		height:              24,
+		viewport:            15,
+		viewportOffset:      0,
+		thumbnailCache:      make(map[string]string),
+		currentPlayingItem:  nil,
+		currentPlayPosition: 0,
+		currentPlayDuration: 0,
+		isVideoPlaying:      false,
 	}
 }
 
 func initialModelWithClient(client *jellyfin.Client) model {
 	return model{
-		client:         client,
-		currentView:    LibraryView,
-		items:          []jellyfin.Item{},
-		cursor:         0,
-		currentPath:    []pathItem{},
-		currentDetails: nil,
-		loading:        true,
-		width:          80,
-		height:         24,
-		viewport:       15,
-		viewportOffset: 0,
-		thumbnailCache: make(map[string]string),
+		client:              client,
+		currentView:         LibraryView,
+		items:               []jellyfin.Item{},
+		cursor:              0,
+		currentPath:         []pathItem{},
+		currentDetails:      nil,
+		loading:             true,
+		width:               80,
+		height:              24,
+		viewport:            15,
+		viewportOffset:      0,
+		thumbnailCache:      make(map[string]string),
+		currentPlayingItem:  nil,
+		currentPlayPosition: 0,
+		currentPlayDuration: 0,
+		isVideoPlaying:      false,
 	}
 }
 
@@ -195,7 +225,10 @@ func (m model) Init() tea.Cmd {
 	if m.err != nil {
 		return nil
 	}
-	return loadLibraries(m.client)
+	return tea.Batch(
+		loadLibraries(m.client),
+		createProgressUpdateCmd(),
+	)
 }
 
 func loadLibraries(client *jellyfin.Client) tea.Cmd {
@@ -241,7 +274,6 @@ func loadItemDetails(client *jellyfin.Client, itemID string) tea.Cmd {
 		return itemDetailsLoadedMsg{details}
 	}
 }
-
 
 func searchItems(client *jellyfin.Client, query string) tea.Cmd {
 	return func() tea.Msg {
@@ -332,11 +364,11 @@ func toggleWatchedStatus(client *jellyfin.Client, itemID string, currentDetails 
 
 // isVirtualFolder checks if an item ID is a virtual folder
 func isVirtualFolder(itemID string) bool {
-	return itemID == "virtual-continue-watching" || 
-		   itemID == "virtual-next-up" || 
-		   itemID == "virtual-recently-added-movies" || 
-		   itemID == "virtual-recently-added-shows" || 
-		   itemID == "virtual-recently-added-episodes"
+	return itemID == "virtual-continue-watching" ||
+		itemID == "virtual-next-up" ||
+		itemID == "virtual-recently-added-movies" ||
+		itemID == "virtual-recently-added-shows" ||
+		itemID == "virtual-recently-added-episodes"
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -349,7 +381,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	
+
 	// Clear success message on any key press
 	if m.successMsg != "" {
 		switch msg.(type) {
@@ -371,14 +403,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		virtualItems := []jellyfin.Item{
 			&jellyfin.SimpleItem{
 				Name:     "Continue Watching",
-				ID:       "virtual-continue-watching", 
+				ID:       "virtual-continue-watching",
 				IsFolder: true,
 				Type:     "VirtualFolder",
 			},
 			&jellyfin.SimpleItem{
 				Name:     "Next Up",
 				ID:       "virtual-next-up",
-				IsFolder: true,  
+				IsFolder: true,
 				Type:     "VirtualFolder",
 			},
 			&jellyfin.SimpleItem{
@@ -441,7 +473,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case itemDetailsLoadedMsg:
 		m.currentDetails = msg.details
-		
+
 		// Limit cache size to prevent memory growth - keep only recent items
 		if len(m.thumbnailCache) > 20 {
 			// Clear old entries, keep only items with current item ID
@@ -454,7 +486,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.thumbnailCache = newCache
 		}
-		
+
 		return m, nil
 
 	case searchResultsMsg:
@@ -497,7 +529,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentDetails.UserData.PlayCount = 0
 			}
 		}
-		
+
 		// Also update the item in the items list if it's a DetailedItem
 		for i, item := range m.items {
 			if item.GetID() == msg.itemID {
@@ -514,6 +546,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		return m, nil
+
+	case playbackProgressMsg:
+		m.currentPlayPosition = msg.position
+		m.currentPlayDuration = msg.duration
+		wasPlaying := m.isVideoPlaying
+		m.isVideoPlaying = msg.isPlaying
+
+		if !msg.isPlaying && wasPlaying {
+			// Video stopped, clear the current playing item
+			m.currentPlayingItem = nil
+			m.currentPlayPosition = 0
+			m.currentPlayDuration = 0
+		}
+		// Continue updating progress only if something is playing or we just detected playback
+		if msg.isPlaying || wasPlaying {
+			return m, createProgressUpdateCmd()
+		}
+		return m, nil
+
+	case playbackStoppedMsg:
+		m.isVideoPlaying = false
+		m.currentPlayingItem = nil
+		m.currentPlayPosition = 0
+		m.currentPlayDuration = 0
+		return m, nil
+
+	case stopPlaybackMsg:
+		m.isVideoPlaying = false
+		m.currentPlayingItem = nil
+		m.currentPlayPosition = 0
+		m.currentPlayDuration = 0
+		return m, nil
+
+	case togglePauseMsg:
+		// The pause state will be updated automatically by the next progress update
+		// No need to change m.isVideoPlaying here as it will be reflected in checkMpvStatus
+		return m, nil
+
+	case cycleSubtitleMsg:
+		// Subtitle track cycling handled, no UI state changes needed
+		return m, nil
+
+	case cycleAudioMsg:
+		// Audio track cycling handled, no UI state changes needed
 		return m, nil
 
 	case tea.KeyMsg:
@@ -617,7 +694,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.cursor = newCursor
 				m.updateViewport()
-				
+
 				itemID := m.items[m.cursor].GetID()
 				if isVirtualFolder(itemID) {
 					// Clear detail panel for virtual directories
@@ -637,7 +714,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.cursor = newCursor
 				m.updateViewport()
-				
+
 				itemID := m.items[m.cursor].GetID()
 				if isVirtualFolder(itemID) {
 					// Clear detail panel for virtual directories
@@ -658,15 +735,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, openThumbnail(m.client, m.currentDetails)
 			}
 		case "p", " ":
-			// Play item from beginning
-			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() {
-				return m, playItem(m.client, m.items[m.cursor].GetID(), 0) // Start from beginning
+			// If video is playing, toggle pause/play; otherwise play from beginning
+			if m.isVideoPlaying {
+				return m, togglePause()
+			} else if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() {
+				m.currentPlayingItem = m.currentDetails
+				return m, tea.Batch(
+					playItem(m.client, m.items[m.cursor].GetID(), 0),
+					createProgressUpdateCmd(),
+				)
 			}
 		case "r":
 			// Resume item from saved position
 			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil && m.currentDetails.HasResumePosition() {
 				resumePosition := m.currentDetails.GetPlaybackPositionTicks()
-				return m, playItem(m.client, m.items[m.cursor].GetID(), resumePosition)
+				m.currentPlayingItem = m.currentDetails
+				return m, tea.Batch(
+					playItem(m.client, m.items[m.cursor].GetID(), resumePosition),
+					createProgressUpdateCmd(),
+				)
 			}
 		case "w":
 			// Toggle watched status
@@ -688,6 +775,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil {
 				return m, removeDownload(m.client, m.currentDetails)
 			}
+		case "s":
+			// Stop video playback
+			if m.isVideoPlaying {
+				return m, stopPlayback()
+			}
+		case "u":
+			// Cycle subtitle tracks (u for sUbtitles)
+			if m.isVideoPlaying {
+				return m, cycleSub()
+			}
+		case "a":
+			// Cycle audio tracks
+			if m.isVideoPlaying {
+				return m, cycleAudio()
+			}
 		}
 	}
 
@@ -696,7 +798,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) selectItem() (model, tea.Cmd) {
 	item := m.items[m.cursor]
-	
+
 	if item.GetIsFolder() {
 		// Handle virtual directories
 		if item.GetID() == "virtual-continue-watching" {
@@ -735,7 +837,7 @@ func (m model) selectItem() (model, tea.Cmd) {
 			m.loading = true
 			return m, loadRecentlyAddedEpisodes(m.client)
 		}
-		
+
 		// Navigate into regular folder/library
 		m.currentPath = append(m.currentPath, pathItem{
 			name: item.GetName(),
@@ -748,10 +850,18 @@ func (m model) selectItem() (model, tea.Cmd) {
 		if m.currentDetails != nil && m.currentDetails.HasResumePosition() {
 			// Resume from saved position
 			resumePosition := m.currentDetails.GetPlaybackPositionTicks()
-			return m, playItem(m.client, item.GetID(), resumePosition)
+			m.currentPlayingItem = m.currentDetails
+			return m, tea.Batch(
+				playItem(m.client, item.GetID(), resumePosition),
+				createProgressUpdateCmd(),
+			)
 		} else {
 			// Play from beginning
-			return m, playItem(m.client, item.GetID(), 0)
+			m.currentPlayingItem = m.currentDetails
+			return m, tea.Batch(
+				playItem(m.client, item.GetID(), 0),
+				createProgressUpdateCmd(),
+			)
 		}
 	}
 }
@@ -761,23 +871,28 @@ var runningMpvProcesses []*exec.Cmd
 
 func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) tea.Cmd {
 	return func() tea.Msg {
+		// Close any existing jtui-launched videos before starting a new one
+		if len(runningMpvProcesses) > 0 {
+			CleanupMpvProcesses()
+		}
+
 		var streamURL string
 		var isLocal bool
-		
+
 		// Get detailed item info to check for local copy
 		detailedItem, err := client.Items.GetDetails(itemID)
 		if err != nil {
 			// Fallback to remote if we can't get details
 			detailedItem = nil
 		}
-		
+
 		// Handle offline content differently
 		if client.IsOfflineMode() && strings.HasPrefix(itemID, "offline-") {
 			// Check if this is a series (folder) - can't play folders
 			if strings.HasPrefix(itemID, "offline-series-") {
 				return errMsg{fmt.Errorf("cannot play a series folder - please select an episode")}
 			}
-			
+
 			// Get the local file path directly for offline content (episodes/movies only)
 			_, filePath, err := client.Download.GetOfflineItemByID(itemID)
 			if err != nil {
@@ -789,23 +904,24 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 			// Get playback URL (local file or remote stream)
 			streamURL, isLocal = client.Playback.GetPlaybackURL(itemID, detailedItem)
 		}
-		
+
 		// Prepare mpv command with JSON IPC enabled for position tracking
-		args := []string{"--input-ipc-server=/tmp/mpvsocket"}
-		
+		// Use a unique socket path to identify jtui-launched processes
+		args := []string{"--input-ipc-server=/tmp/jtui-mpvsocket", "--title=jtui-player"}
+
 		// Add start position if resuming
 		if startPositionTicks > 0 {
 			// Convert ticks to seconds for mpv (1 tick = 100 nanoseconds)
 			startSeconds := float64(startPositionTicks) / 10000000.0
 			args = append(args, fmt.Sprintf("--start=%.2f", startSeconds))
 		}
-		
+
 		args = append(args, streamURL)
 		cmd := exec.Command("mpv", args...)
-		
+
 		// Add to global tracking so we can kill it on exit
 		runningMpvProcesses = append(runningMpvProcesses, cmd)
-		
+
 		// Start playback tracking in background
 		go func() {
 			// Only report to server if playing remote content
@@ -813,16 +929,16 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 				// Report playback start
 				client.Playback.ReportStart(itemID)
 			}
-			
+
 			// Channel to stop progress reporting when mpv exits
 			done := make(chan bool)
-			
+
 			// Start continuous progress reporting goroutine (only for remote content)
 			if !isLocal {
 				go func() {
 					ticker := time.NewTicker(5 * time.Second) // Report every 5 seconds
 					defer ticker.Stop()
-					
+
 					for {
 						select {
 						case <-done:
@@ -838,13 +954,13 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 					}
 				}()
 			}
-			
+
 			// Run mpv and wait for completion
 			cmd.Run()
-			
+
 			// Signal progress reporting to stop
 			close(done)
-			
+
 			// Remove from tracking list when mpv exits
 			for i, p := range runningMpvProcesses {
 				if p == cmd {
@@ -852,7 +968,7 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 					break
 				}
 			}
-			
+
 			// Send final progress update (only for remote content)
 			if !isLocal {
 				if finalPosition := getMpvPosition(); finalPosition > 0 {
@@ -861,48 +977,363 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 				}
 			}
 		}()
-		
+
 		return nil
 	}
 }
 
 // getMpvPosition retrieves current playback position from mpv via JSON IPC
 func getMpvPosition() float64 {
-	conn, err := net.Dial("unix", "/tmp/mpvsocket")
+	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
 	if err != nil {
 		return 0
 	}
 	defer conn.Close()
-	
+
 	// Send command to get playback position
 	command := map[string]interface{}{
 		"command": []string{"get_property", "time-pos"},
 	}
-	
+
 	jsonData, err := json.Marshal(command)
 	if err != nil {
 		return 0
 	}
-	
+
 	conn.Write(append(jsonData, '\n'))
-	
+
 	// Read response
 	buffer := make([]byte, 1024)
 	n, err := conn.Read(buffer)
 	if err != nil {
 		return 0
 	}
-	
+
 	var response map[string]interface{}
 	if err := json.Unmarshal(buffer[:n], &response); err != nil {
 		return 0
 	}
-	
+
 	if data, ok := response["data"].(float64); ok {
 		return data
 	}
-	
+
 	return 0
+}
+
+// getMpvDuration retrieves total duration from mpv via JSON IPC
+func getMpvDuration() float64 {
+	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+	if err != nil {
+		return 0
+	}
+	defer conn.Close()
+
+	// Send command to get duration
+	command := map[string]interface{}{
+		"command": []string{"get_property", "duration"},
+	}
+
+	jsonData, err := json.Marshal(command)
+	if err != nil {
+		return 0
+	}
+
+	conn.Write(append(jsonData, '\n'))
+
+	// Read response
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return 0
+	}
+
+	var response map[string]interface{}
+	if err := json.Unmarshal(buffer[:n], &response); err != nil {
+		return 0
+	}
+
+	if data, ok := response["data"].(float64); ok {
+		return data
+	}
+
+	return 0
+}
+
+// getMpvCurrentSubtitle gets current subtitle track info from mpv via JSON IPC
+func getMpvCurrentSubtitle() string {
+	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+
+	// Send command to get current subtitle track
+	command := map[string]interface{}{
+		"command": []string{"get_property", "current-tracks/sub"},
+	}
+
+	jsonData, err := json.Marshal(command)
+	if err != nil {
+		return ""
+	}
+
+	conn.Write(append(jsonData, '\n'))
+
+	// Read response
+	buffer := make([]byte, 2048)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return ""
+	}
+
+	var response map[string]interface{}
+	if err := json.Unmarshal(buffer[:n], &response); err != nil {
+		return ""
+	}
+
+	if data, ok := response["data"].(map[string]interface{}); ok {
+		if title, exists := data["title"].(string); exists && title != "" {
+			return title
+		}
+		if lang, exists := data["lang"].(string); exists && lang != "" {
+			return lang
+		}
+		if id, exists := data["id"].(float64); exists {
+			return fmt.Sprintf("Track %d", int(id))
+		}
+	}
+
+	return "Off"
+}
+
+// getMpvCurrentAudio gets current audio track info from mpv via JSON IPC
+func getMpvCurrentAudio() string {
+	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+
+	// Send command to get current audio track
+	command := map[string]interface{}{
+		"command": []string{"get_property", "current-tracks/audio"},
+	}
+
+	jsonData, err := json.Marshal(command)
+	if err != nil {
+		return ""
+	}
+
+	conn.Write(append(jsonData, '\n'))
+
+	// Read response
+	buffer := make([]byte, 2048)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return ""
+	}
+
+	var response map[string]interface{}
+	if err := json.Unmarshal(buffer[:n], &response); err != nil {
+		return ""
+	}
+
+	if data, ok := response["data"].(map[string]interface{}); ok {
+		if title, exists := data["title"].(string); exists && title != "" {
+			return title
+		}
+		if lang, exists := data["lang"].(string); exists && lang != "" {
+			return lang
+		}
+		if id, exists := data["id"].(float64); exists {
+			return fmt.Sprintf("Track %d", int(id))
+		}
+	}
+
+	return "Unknown"
+}
+
+// stopMpv sends a quit command to mpv via JSON IPC
+func stopMpv() error {
+	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Send quit command
+	command := map[string]interface{}{
+		"command": []string{"quit"},
+	}
+
+	jsonData, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+
+	conn.Write(append(jsonData, '\n'))
+	return nil
+}
+
+// togglePauseMpv toggles pause/play state in mpv via JSON IPC
+func togglePauseMpv() error {
+	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Send pause toggle command
+	command := map[string]interface{}{
+		"command": []string{"cycle", "pause"},
+	}
+
+	jsonData, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+
+	conn.Write(append(jsonData, '\n'))
+	return nil
+}
+
+// cycleSubtitleTrack cycles to the next subtitle track in mpv via JSON IPC
+func cycleSubtitleTrack() error {
+	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Send cycle subtitle track command
+	command := map[string]interface{}{
+		"command": []string{"cycle", "sid"},
+	}
+
+	jsonData, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+
+	conn.Write(append(jsonData, '\n'))
+	return nil
+}
+
+// cycleAudioTrack cycles to the next audio track in mpv via JSON IPC
+func cycleAudioTrack() error {
+	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Send cycle audio track command
+	command := map[string]interface{}{
+		"command": []string{"cycle", "aid"},
+	}
+
+	jsonData, err := json.Marshal(command)
+	if err != nil {
+		return err
+	}
+
+	conn.Write(append(jsonData, '\n'))
+	return nil
+}
+
+// checkMpvStatus checks if mpv is running and returns current status
+func checkMpvStatus() (position, duration float64, isPlaying bool) {
+	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+	if err != nil {
+		return 0, 0, false
+	}
+	defer conn.Close()
+
+	// First check if mpv is paused
+	pauseCommand := map[string]interface{}{
+		"command": []string{"get_property", "pause"},
+	}
+
+	jsonData, err := json.Marshal(pauseCommand)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	conn.Write(append(jsonData, '\n'))
+
+	buffer := make([]byte, 1024)
+	n, err := conn.Read(buffer)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	var pauseResponse map[string]interface{}
+	if err := json.Unmarshal(buffer[:n], &pauseResponse); err != nil {
+		return 0, 0, false
+	}
+
+	isPaused, _ := pauseResponse["data"].(bool)
+	position = getMpvPosition()
+	duration = getMpvDuration()
+
+	return position, duration, !isPaused && position >= 0
+}
+
+// createProgressUpdateCmd creates a command that periodically updates playback progress
+func createProgressUpdateCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		position, duration, isPlaying := checkMpvStatus()
+		return playbackProgressMsg{
+			position:  position,
+			duration:  duration,
+			isPlaying: isPlaying,
+		}
+	})
+}
+
+// stopPlayback stops the currently playing video
+func stopPlayback() tea.Cmd {
+	return func() tea.Msg {
+		err := stopMpv()
+		if err != nil {
+			return errMsg{fmt.Errorf("failed to stop playback: %w", err)}
+		}
+		return stopPlaybackMsg{}
+	}
+}
+
+// togglePause toggles pause/play state of the currently playing video
+func togglePause() tea.Cmd {
+	return func() tea.Msg {
+		err := togglePauseMpv()
+		if err != nil {
+			return errMsg{fmt.Errorf("failed to toggle pause: %w", err)}
+		}
+		return togglePauseMsg{}
+	}
+}
+
+// cycleSub cycles to the next subtitle track
+func cycleSub() tea.Cmd {
+	return func() tea.Msg {
+		err := cycleSubtitleTrack()
+		if err != nil {
+			return errMsg{fmt.Errorf("failed to cycle subtitles: %w", err)}
+		}
+		return cycleSubtitleMsg{}
+	}
+}
+
+// cycleAudio cycles to the next audio track
+func cycleAudio() tea.Cmd {
+	return func() tea.Msg {
+		err := cycleAudioTrack()
+		if err != nil {
+			return errMsg{fmt.Errorf("failed to cycle audio: %w", err)}
+		}
+		return cycleAudioMsg{}
+	}
 }
 
 // downloadVideo downloads a video file for offline viewing
@@ -912,7 +1343,7 @@ func downloadVideo(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cmd
 		if downloaded, filePath, err := client.Download.IsDownloaded(item); err == nil && downloaded {
 			return successMsg{fmt.Sprintf("✓ Video already downloaded: %s", filepath.Base(filePath))}
 		}
-		
+
 		// Start download with progress tracking
 		err := client.Download.DownloadVideo(item, func(downloaded, total int64) {
 			// Progress callback - for now just log, could be enhanced with progress display
@@ -921,11 +1352,10 @@ func downloadVideo(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cmd
 				fmt.Printf("\rDownloading: %.1f%%", percentage)
 			}
 		})
-		
 		if err != nil {
 			return errMsg{fmt.Errorf("download failed: %w", err)}
 		}
-		
+
 		return successMsg{fmt.Sprintf("✓ Downloaded: %s", item.Name)}
 	}
 }
@@ -937,7 +1367,7 @@ func removeDownload(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cm
 		if err != nil {
 			return errMsg{fmt.Errorf("failed to remove download: %w", err)}
 		}
-		
+
 		return successMsg{fmt.Sprintf("✓ Removed download: %s", item.Name)}
 	}
 }
@@ -1030,9 +1460,9 @@ func renderThumbnailInlineOptimized(imageURL string, width, height int, itemID s
 
 	// Check for persistent cache file first
 	cacheDir := "/tmp/jtui_thumbs"
-	os.MkdirAll(cacheDir, 0755)
+	os.MkdirAll(cacheDir, 0o755)
 	cacheFile := fmt.Sprintf("%s/%s_%dx%d.txt", cacheDir, itemID, width, height)
-	
+
 	// Try to read from cache
 	if cached, err := os.ReadFile(cacheFile); err == nil {
 		return string(cached), nil
@@ -1040,7 +1470,7 @@ func renderThumbnailInlineOptimized(imageURL string, width, height int, itemID s
 
 	// Download image to temporary file with timeout (reuse existing logic but optimize)
 	tmpFile := fmt.Sprintf("/tmp/jtui_img_%s.jpg", itemID)
-	
+
 	// Check if image already downloaded
 	if _, err := os.Stat(tmpFile); os.IsNotExist(err) {
 		client := &http.Client{Timeout: 5 * time.Second} // Reduced timeout
@@ -1085,7 +1515,7 @@ func renderThumbnailInlineOptimized(imageURL string, width, height int, itemID s
 	}
 
 	// Cache the result to disk for next time
-	os.WriteFile(cacheFile, []byte(rendered), 0644)
+	os.WriteFile(cacheFile, []byte(rendered), 0o644)
 
 	return rendered, nil
 }
@@ -1098,7 +1528,7 @@ func openThumbnail(client *jellyfin.Client, details *jellyfin.DetailedItem) tea.
 		}
 
 		thumbnailPath := fmt.Sprintf("/tmp/jtui_thumb_%s.jpg", details.GetID())
-		
+
 		// Download thumbnail if it doesn't exist
 		if _, err := os.Stat(thumbnailPath); os.IsNotExist(err) {
 			resp, err := http.Get(imageURL)
@@ -1140,7 +1570,7 @@ func (m model) goBack() (model, tea.Cmd) {
 
 	// Remove last path item
 	m.currentPath = m.currentPath[:len(m.currentPath)-1]
-	
+
 	if len(m.currentPath) == 0 {
 		// Back to libraries
 		m.currentView = LibraryView
@@ -1160,7 +1590,7 @@ func (m *model) updateViewport() {
 	if m.viewport < 5 {
 		m.viewport = 5
 	}
-	
+
 	// Adjust viewport offset to keep cursor visible
 	if m.cursor < m.viewportOffset {
 		m.viewportOffset = m.cursor
@@ -1175,7 +1605,7 @@ func (m *model) updateViewportForBottom() {
 	if m.viewport < 5 {
 		m.viewport = 5
 	}
-	
+
 	// Set viewport to show the bottom
 	if len(m.items) > m.viewport {
 		m.viewportOffset = len(m.items) - m.viewport
@@ -1188,7 +1618,7 @@ func (m model) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("Error: %v\n\nPress 'q' to quit.", m.err)
 	}
-	
+
 	if m.successMsg != "" {
 		return fmt.Sprintf("%s\n\nPress any key to continue.", m.successMsg)
 	}
@@ -1198,7 +1628,7 @@ func (m model) View() string {
 	}
 
 	// Ensure we have up-to-date viewport (inline for value receiver)
-	viewport := m.height - 8 
+	viewport := m.height - 8
 	if viewport < 5 {
 		viewport = 5
 	}
@@ -1224,7 +1654,7 @@ func (m model) View() string {
 		Height(contentHeight).
 		Border(lipgloss.RoundedBorder(), false, true, false, false).
 		BorderForeground(lipgloss.Color("#333"))
-	
+
 	rightStyle := lipgloss.NewStyle().
 		Width(rightWidth).
 		Height(contentHeight).
@@ -1239,16 +1669,22 @@ func (m model) View() string {
 
 	// Join horizontally and add help at bottom
 	content := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
-	
-	// Join content and help
-	finalContent := lipgloss.JoinVertical(lipgloss.Left, content, help)
-	
+
+	// Add progress bar if video is playing
+	var finalContent string
+	if m.isVideoPlaying && m.currentPlayingItem != nil {
+		progressBar := m.renderProgressBar()
+		finalContent = lipgloss.JoinVertical(lipgloss.Left, content, progressBar, help)
+	} else {
+		finalContent = lipgloss.JoinVertical(lipgloss.Left, content, help)
+	}
+
 	return finalContent
 }
 
 func (m model) renderItemList(width, height, viewport, viewportOffset int) string {
 	var content strings.Builder
-	
+
 	// Title based on current view (ensure it fits)
 	title := ""
 	switch m.currentView {
@@ -1282,8 +1718,8 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 			}
 		}
 	}
-	
-	content.WriteString(titleStyle.Width(width-4).Render(title))
+
+	content.WriteString(titleStyle.Width(width - 4).Render(title))
 	content.WriteString("\n")
 
 	if len(m.items) == 0 {
@@ -1308,7 +1744,7 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 	for i := start; i < end; i++ {
 		item := m.items[i]
 		itemText := item.GetName()
-		
+
 		// Add watched icon based on watch status and download status
 		watchedIcon := "   "
 		if detailedItem, ok := item.(jellyfin.DetailedItem); ok {
@@ -1361,11 +1797,11 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 				watchedIcon = " ⭕ "
 			}
 		}
-		
+
 		if item.GetIsFolder() {
 			itemText += "/"
 		}
-		
+
 		// Truncate if too long (leave space for cursor, padding, and icon)
 		maxItemWidth := width - 10
 		if maxItemWidth < 10 {
@@ -1375,19 +1811,19 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 			// Use lipgloss to handle truncation properly
 			itemText = lipgloss.NewStyle().Width(maxItemWidth).Render(itemText)
 		}
-		
+
 		if i == m.cursor {
 			content.WriteString(selectedStyle.Render(" ▶" + watchedIcon + itemText + " "))
 		} else {
 			content.WriteString(itemStyle.Render(watchedIcon + itemText))
 		}
-		
+
 		// Don't add newline for the last item to avoid overflow
 		if i < end-1 {
 			content.WriteString("\n")
 		}
 	}
-	
+
 	// Add scroll indicators if needed
 	if viewportOffset > 0 {
 		// There are items above
@@ -1397,7 +1833,7 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 		// There are items below
 		content.WriteString("\n" + dimStyle.Render("  ↓ more items below"))
 	}
-	
+
 	return content.String()
 }
 
@@ -1412,25 +1848,31 @@ func (m model) renderDetails(width, height int) string {
 			case "virtual-next-up":
 				return infoStyle.Render("Next Up\n\nShows the next episodes in your TV series.\nPress Enter to continue watching.")
 			case "virtual-recently-added-movies":
-				return infoStyle.Render("Recently Added Movies\n\nShows the latest movies added to your library.\nPress Enter to browse recently added movies.")
+				return infoStyle.Render(
+					"Recently Added Movies\n\nShows the latest movies added to your library.\nPress Enter to browse recently added movies.",
+				)
 			case "virtual-recently-added-shows":
-				return infoStyle.Render("Recently Added Shows\n\nShows the latest TV shows added to your library.\nPress Enter to browse recently added shows.")
+				return infoStyle.Render(
+					"Recently Added Shows\n\nShows the latest TV shows added to your library.\nPress Enter to browse recently added shows.",
+				)
 			case "virtual-recently-added-episodes":
-				return infoStyle.Render("Recently Added Episodes\n\nShows the latest episodes added to your library.\nPress Enter to browse recently added episodes.")
+				return infoStyle.Render(
+					"Recently Added Episodes\n\nShows the latest episodes added to your library.\nPress Enter to browse recently added episodes.",
+				)
 			}
 		}
 		return dimStyle.Render("Select an item to view details")
 	}
-	
+
 	var details strings.Builder
 	linesUsed := 0
 	maxLines := height - 2 // Leave space for borders
-	
+
 	// Title
-	details.WriteString(titleStyle.Width(width-4).Render("Details"))
+	details.WriteString(titleStyle.Width(width - 4).Render("Details"))
 	details.WriteString("\n")
 	linesUsed++
-	
+
 	if linesUsed >= maxLines {
 		return details.String()
 	}
@@ -1448,26 +1890,26 @@ func (m model) renderDetails(width, height int) string {
 				thumbWidth = 30
 			}
 			// Use more space for height - about 45% of available space
-			thumbHeight := (maxLines * 9) / 20 
+			thumbHeight := (maxLines * 9) / 20
 			if thumbHeight > 18 {
 				thumbHeight = 18 // Cap at 18 lines
 			}
 			if thumbHeight < 10 {
 				thumbHeight = 10 // Minimum 10 lines
 			}
-			
+
 			// Check cache first - ensure it's for the current item
 			currentItemID := m.currentDetails.GetID()
 			cacheKey := fmt.Sprintf("%s_%d_%d", currentItemID, thumbWidth, thumbHeight)
-			
+
 			if cachedThumbnail, exists := m.thumbnailCache[cacheKey]; exists {
 				// Use cached thumbnail for this specific item
 				thumbnailLines := strings.Count(cachedThumbnail, "\n")
 				if thumbnailLines == 0 && cachedThumbnail != "" {
 					thumbnailLines = 1
 				}
-				
-				if linesUsed + thumbnailLines + 3 < maxLines {
+
+				if linesUsed+thumbnailLines+3 < maxLines {
 					details.WriteString(cachedThumbnail)
 					details.WriteString("\n\n")
 					linesUsed += thumbnailLines + 2
@@ -1477,29 +1919,28 @@ func (m model) renderDetails(width, height int) string {
 				if thumbnail, err := renderThumbnailInlineOptimized(imageURL, thumbWidth, thumbHeight, currentItemID); err == nil {
 					// Cache the result for this specific item
 					m.thumbnailCache[cacheKey] = thumbnail
-					
+
 					// Count actual lines in the rendered thumbnail
 					thumbnailLines := strings.Count(thumbnail, "\n")
 					if thumbnailLines == 0 && thumbnail != "" {
 						thumbnailLines = 1
 					}
-					
+
 					// Check if we have space for the thumbnail plus some detail text
-					if linesUsed + thumbnailLines + 3 < maxLines {
+					if linesUsed+thumbnailLines+3 < maxLines {
 						details.WriteString(thumbnail)
 						details.WriteString("\n\n")
 						linesUsed += thumbnailLines + 2
 					}
 				}
 			}
-			
+
 			if linesUsed >= maxLines {
 				return details.String()
 			}
 		}
 	}
-	
-	
+
 	// Name
 	name := m.currentDetails.GetName()
 	if len(name) > width-8 {
@@ -1511,7 +1952,7 @@ func (m model) renderDetails(width, height int) string {
 	if linesUsed >= maxLines {
 		return details.String()
 	}
-	
+
 	// Series Name (for episodes)
 	if seriesName := m.currentDetails.GetSeriesName(); seriesName != "" {
 		if len(seriesName) > width-10 {
@@ -1524,7 +1965,7 @@ func (m model) renderDetails(width, height int) string {
 			return details.String()
 		}
 	}
-	
+
 	// Season and Episode info
 	if seasonNum := m.currentDetails.GetSeasonNumber(); seasonNum > 0 {
 		episodeNum := m.currentDetails.GetEpisodeNumber()
@@ -1539,7 +1980,7 @@ func (m model) renderDetails(width, height int) string {
 			return details.String()
 		}
 	}
-	
+
 	// Year
 	if year := m.currentDetails.GetYear(); year > 0 {
 		details.WriteString(infoStyle.Render(fmt.Sprintf("Year: %d", year)))
@@ -1549,7 +1990,7 @@ func (m model) renderDetails(width, height int) string {
 			return details.String()
 		}
 	}
-	
+
 	// Runtime
 	if runtime := m.currentDetails.GetRuntime(); runtime != "" {
 		details.WriteString(infoStyle.Render(fmt.Sprintf("Runtime: %s", runtime)))
@@ -1559,7 +2000,7 @@ func (m model) renderDetails(width, height int) string {
 			return details.String()
 		}
 	}
-	
+
 	// Genres
 	if genres := m.currentDetails.GetGenres(); genres != "" {
 		if len(genres) > width-10 {
@@ -1572,7 +2013,7 @@ func (m model) renderDetails(width, height int) string {
 			return details.String()
 		}
 	}
-	
+
 	// Studio
 	if studio := m.currentDetails.GetStudio(); studio != "" {
 		if len(studio) > width-9 {
@@ -1585,7 +2026,7 @@ func (m model) renderDetails(width, height int) string {
 			return details.String()
 		}
 	}
-	
+
 	// Download status
 	if m.client.IsOfflineMode() {
 		// In offline mode, all content is already downloaded
@@ -1624,7 +2065,7 @@ func (m model) renderDetails(width, height int) string {
 			}
 		}
 	}
-	
+
 	// Watch status
 	if m.currentDetails.IsWatched() {
 		details.WriteString(dimStyle.Render("✅ Watched"))
@@ -1644,26 +2085,26 @@ func (m model) renderDetails(width, height int) string {
 			return details.String()
 		}
 	}
-	
+
 	// Overview with word wrapping and line limit
 	if overview := m.currentDetails.GetOverview(); overview != "" && linesUsed < maxLines-2 {
 		details.WriteString("\n")
 		details.WriteString(infoStyle.Render("Overview:"))
 		details.WriteString("\n")
 		linesUsed += 2
-		
+
 		words := strings.Fields(overview)
 		line := ""
 		lineWidth := width - 4
 		if lineWidth < 20 {
 			lineWidth = 20
 		}
-		
+
 		for _, word := range words {
 			if linesUsed >= maxLines {
 				break
 			}
-			
+
 			if len(line)+len(word)+1 > lineWidth {
 				details.WriteString(dimStyle.Render(line))
 				details.WriteString("\n")
@@ -1676,12 +2117,12 @@ func (m model) renderDetails(width, height int) string {
 				line += word
 			}
 		}
-		
+
 		if line != "" && linesUsed < maxLines {
 			details.WriteString(dimStyle.Render(line))
 		}
 	}
-	
+
 	return details.String()
 }
 
@@ -1700,21 +2141,25 @@ func formatFileSize(bytes int64) string {
 		float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// CleanupMpvProcesses kills any running mpv processes when jtui exits
+// CleanupMpvProcesses kills any running jtui-launched mpv processes
 func CleanupMpvProcesses() {
 	for _, cmd := range runningMpvProcesses {
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}
 	}
+	// Clear the tracking list
 	runningMpvProcesses = nil
+
+	// Also clean up the socket file to prevent conflicts
+	os.Remove("/tmp/jtui-mpvsocket")
 }
 
 // setupCleanupHandlers sets up signal handlers to cleanup mpv processes on exit
 func setupCleanupHandlers() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	
+
 	go func() {
 		<-c
 		CleanupMpvProcesses()
@@ -1730,8 +2175,11 @@ var helpText = strings.Join([]string{
 	"Enter: select/resume",
 	"h/Bksp: back",
 	"t: thumbnail",
-	"p/Space: play",
+	"p/Space: play/pause",
 	"r: resume",
+	"s: stop",
+	"u: cycle subs (🔊💬 indicator shows active tracks)",
+	"a: cycle audio",
 	"w: toggle watched",
 	"d: download",
 	"x: remove download",
@@ -1739,12 +2187,127 @@ var helpText = strings.Join([]string{
 	"q: quit",
 }, " • ")
 
+func (m model) renderProgressBar() string {
+	if !m.isVideoPlaying || m.currentPlayingItem == nil {
+		return ""
+	}
+
+	// Calculate progress percentage
+	var percentage float64
+	if m.currentPlayDuration > 0 {
+		percentage = (m.currentPlayPosition / m.currentPlayDuration) * 100
+		if percentage > 100 {
+			percentage = 100
+		}
+	}
+
+	// Format time strings
+	currentTime := formatSeconds(m.currentPlayPosition)
+	totalTime := formatSeconds(m.currentPlayDuration)
+
+	// Get current track information
+	currentSub := getMpvCurrentSubtitle()
+	currentAudio := getMpvCurrentAudio()
+
+	// Format track indicators
+	var trackInfo string
+	if currentSub == "Off" || currentSub == "" {
+		trackInfo = fmt.Sprintf("🔊 %s", currentAudio)
+	} else {
+		trackInfo = fmt.Sprintf("🔊 %s • 💬 %s", currentAudio, currentSub)
+	}
+
+	// Video title (truncated if necessary)
+	videoTitle := m.currentPlayingItem.GetName()
+	// Calculate available space for title considering track info
+	usedSpace := len(currentTime) + len(totalTime) + len(trackInfo) + 35 // margins and symbols
+	maxTitleWidth := m.width - usedSpace
+	if maxTitleWidth < 10 {
+		maxTitleWidth = 10
+		// If title space is too small, truncate track info instead
+		if len(trackInfo) > 30 {
+			trackInfo = trackInfo[:27] + "..."
+		}
+		maxTitleWidth = m.width - len(currentTime) - len(totalTime) - len(trackInfo) - 35
+		if maxTitleWidth < 10 {
+			maxTitleWidth = 10
+		}
+	}
+	if len(videoTitle) > maxTitleWidth {
+		videoTitle = videoTitle[:maxTitleWidth-3] + "..."
+	}
+
+	// Create progress bar
+	barWidth := m.width - len(currentTime) - len(totalTime) - len(videoTitle) - len(trackInfo) - 15
+	if barWidth < 8 {
+		barWidth = 8
+	}
+
+	filledWidth := int((percentage / 100) * float64(barWidth))
+	if filledWidth > barWidth {
+		filledWidth = barWidth
+	}
+
+	progressBar := ""
+	for i := 0; i < barWidth; i++ {
+		if i < filledWidth {
+			progressBar += "█"
+		} else {
+			progressBar += "░"
+		}
+	}
+
+	// Style the progress bar components
+	progressStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Background(lipgloss.Color("#7D56F4")).
+		Padding(0, 1)
+
+	titleStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FAFAFA")).
+		Bold(true)
+
+	timeStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#AAAAAA"))
+
+	trackStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#88C999"))
+
+	// Create the first line with title, time, and progress bar
+	progressLine := fmt.Sprintf("%s %s [%s] %s (%.1f%%)",
+		titleStyle.Render("▶ "+videoTitle),
+		timeStyle.Render(currentTime),
+		progressStyle.Render(progressBar),
+		timeStyle.Render(totalTime),
+		percentage,
+	)
+
+	// Create the second line with track information
+	trackLine := trackStyle.Render(trackInfo)
+
+	// Combine both lines
+	return progressLine + "\n" + trackLine
+}
+
+// formatSeconds converts seconds to MM:SS or HH:MM:SS format
+func formatSeconds(seconds float64) string {
+	totalSeconds := int(seconds)
+	hours := totalSeconds / 3600
+	minutes := (totalSeconds % 3600) / 60
+	secs := totalSeconds % 60
+
+	if hours > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, secs)
+	}
+	return fmt.Sprintf("%d:%02d", minutes, secs)
+}
+
 func (m model) renderHelp() string {
 	// Ensure help text fits
 	if len(helpText) > m.width-2 {
 		// Use lipgloss truncate to handle ANSI properly
-		return dimStyle.Render(lipgloss.NewStyle().Width(m.width-2).Render(helpText))
+		return dimStyle.Render(lipgloss.NewStyle().Width(m.width - 2).Render(helpText))
 	}
-	
+
 	return dimStyle.Render(helpText)
 }

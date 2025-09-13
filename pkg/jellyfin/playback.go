@@ -39,8 +39,14 @@ func (p *PlaybackAPI) ReportStart(itemID string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName, p.client.config.ClientName, p.client.config.DeviceID, p.client.config.Version, p.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		p.client.config.ClientName,
+		p.client.config.ClientName,
+		p.client.config.DeviceID,
+		p.client.config.Version,
+		p.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.http.Do(req)
@@ -82,8 +88,14 @@ func (p *PlaybackAPI) ReportStop(itemID string, positionTicks int64) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName, p.client.config.ClientName, p.client.config.DeviceID, p.client.config.Version, p.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		p.client.config.ClientName,
+		p.client.config.ClientName,
+		p.client.config.DeviceID,
+		p.client.config.Version,
+		p.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.http.Do(req)
@@ -127,8 +139,14 @@ func (p *PlaybackAPI) ReportProgress(itemID string, positionTicks int64) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName, p.client.config.ClientName, p.client.config.DeviceID, p.client.config.Version, p.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		p.client.config.ClientName,
+		p.client.config.ClientName,
+		p.client.config.DeviceID,
+		p.client.config.Version,
+		p.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.http.Do(req)
@@ -147,13 +165,13 @@ func (p *PlaybackAPI) ReportProgress(itemID string, positionTicks int64) error {
 
 // GetStreamURL generates a stream URL for an item
 func (p *PlaybackAPI) GetStreamURL(itemID string) string {
-	return fmt.Sprintf("%s/Videos/%s/stream?api_key=%s", 
+	return fmt.Sprintf("%s/Videos/%s/stream?api_key=%s",
 		p.client.config.ServerURL, itemID, p.client.config.AccessToken)
 }
 
 // GetDownloadURL generates a download URL for an item
 func (p *PlaybackAPI) GetDownloadURL(itemID string) string {
-	return fmt.Sprintf("%s/Items/%s/Download?api_key=%s", 
+	return fmt.Sprintf("%s/Items/%s/Download?api_key=%s",
 		p.client.config.ServerURL, itemID, p.client.config.AccessToken)
 }
 
@@ -166,7 +184,7 @@ func (p *PlaybackAPI) GetPlaybackURL(itemID string, item *DetailedItem) (string,
 			return localPath, true
 		}
 	}
-	
+
 	// Fall back to remote download URL
 	return p.GetDownloadURL(itemID), false
 }
@@ -184,8 +202,14 @@ func (p *PlaybackAPI) MarkWatched(itemID string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName, p.client.config.ClientName, p.client.config.DeviceID, p.client.config.Version, p.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		p.client.config.ClientName,
+		p.client.config.ClientName,
+		p.client.config.DeviceID,
+		p.client.config.Version,
+		p.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.http.Do(req)
@@ -215,8 +239,14 @@ func (p *PlaybackAPI) MarkUnwatched(itemID string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName, p.client.config.ClientName, p.client.config.DeviceID, p.client.config.Version, p.client.config.AccessToken))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		p.client.config.ClientName,
+		p.client.config.ClientName,
+		p.client.config.DeviceID,
+		p.client.config.Version,
+		p.client.config.AccessToken,
+	))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.http.Do(req)

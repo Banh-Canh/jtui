@@ -6,12 +6,12 @@ package cmd
 import (
 	"fmt"
 	"os"
-	
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/Banh-Canh/jtui/pkg/jellyfin"
 	"github.com/Banh-Canh/jtui/internal/ui"
+	"github.com/Banh-Canh/jtui/pkg/jellyfin"
 )
 
 var queryCmd = &cobra.Command{
@@ -31,7 +31,7 @@ Use arrow keys or hjkl to navigate, Enter to open, Space/p to play.`,
 			fmt.Printf("❌ Error connecting to Jellyfin: %v\n", err)
 			os.Exit(1)
 		}
-		
+
 		// Start TUI with authenticated client
 		ui.MenuWithClient(client)
 	},

@@ -48,17 +48,17 @@ type DetailedItem struct {
 	BackdropImageTags []string `json:"BackdropImageTags"`
 	UserData          struct {
 		PlaybackPositionTicks int64   `json:"PlaybackPositionTicks"`
-		PlayCount            int     `json:"PlayCount"`
-		IsFavorite           bool    `json:"IsFavorite"`
-		Played               bool    `json:"Played"`
-		PlayedPercentage     float64 `json:"PlayedPercentage"`
+		PlayCount             int     `json:"PlayCount"`
+		IsFavorite            bool    `json:"IsFavorite"`
+		Played                bool    `json:"Played"`
+		PlayedPercentage      float64 `json:"PlayedPercentage"`
 	} `json:"UserData"`
-	
+
 	// Series/Season information
-	SeriesName     string `json:"SeriesName,omitempty"`
-	SeasonName     string `json:"SeasonName,omitempty"`
-	ParentIndexNumber int `json:"ParentIndexNumber,omitempty"`
-	IndexNumber    int    `json:"IndexNumber,omitempty"`
+	SeriesName        string `json:"SeriesName,omitempty"`
+	SeasonName        string `json:"SeasonName,omitempty"`
+	ParentIndexNumber int    `json:"ParentIndexNumber,omitempty"`
+	IndexNumber       int    `json:"IndexNumber,omitempty"`
 }
 
 // Additional methods for DetailedItem
@@ -158,12 +158,12 @@ type DetailedItemsResponse struct {
 
 // PlaybackInfo holds playback session information
 type PlaybackInfo struct {
-	ItemID         string `json:"ItemId"`
-	SessionID      string `json:"SessionId"`
-	MediaSourceID  string `json:"MediaSourceId"`
-	PositionTicks  int64  `json:"PositionTicks,omitempty"`
-	CanSeek        bool   `json:"CanSeek,omitempty"`
-	PlayMethod     string `json:"PlayMethod,omitempty"`
+	ItemID        string `json:"ItemId"`
+	SessionID     string `json:"SessionId"`
+	MediaSourceID string `json:"MediaSourceId"`
+	PositionTicks int64  `json:"PositionTicks,omitempty"`
+	CanSeek       bool   `json:"CanSeek,omitempty"`
+	PlayMethod    string `json:"PlayMethod,omitempty"`
 }
 
 // UserInfo represents user information

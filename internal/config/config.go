@@ -33,7 +33,7 @@ func CreateDefaultConfigFile(filePath string) {
 func GetConfigDirPath() (string, error) {
 	// Construct the directory path to the config directory
 	configDirPath := filepath.Join(xdg.ConfigHome, "jtui")
-	if err := os.MkdirAll(configDirPath, 0755); err != nil {
+	if err := os.MkdirAll(configDirPath, 0o755); err != nil {
 		return "", fmt.Errorf("failed to create config directory: %v", err)
 	}
 	return configDirPath, nil

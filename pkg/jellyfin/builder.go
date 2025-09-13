@@ -113,12 +113,11 @@ func ConnectFromConfig(getConfigString func(key string) string) (*Client, error)
 	client, err := NewClientBuilder().
 		WithServerURL(serverURL).
 		BuildAndConnect()
-	
 	if err != nil {
 		// If server connection fails, try offline mode
 		return CreateOfflineClient(serverURL)
 	}
-	
+
 	return client, nil
 }
 
@@ -133,17 +132,17 @@ func CreateOfflineClient(serverURL string) (*Client, error) {
 	}
 
 	client := NewClient(config)
-	
+
 	// Check if we have any offline content
 	offlineItems, err := client.Download.DiscoverOfflineContent()
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover offline content: %w", err)
 	}
-	
+
 	if len(offlineItems) == 0 {
 		return nil, fmt.Errorf("no server connection and no offline content available")
 	}
-	
+
 	return client, nil
 }
 
