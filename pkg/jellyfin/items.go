@@ -118,12 +118,13 @@ func (i *ItemsAPI) GetDetails(itemID string) (*DetailedItem, error) {
 	return &item, nil
 }
 
-// GetImageURL generates an image URL for a specific item and image type
+// GetImageURL generates an optimized image URL for a specific item and image type
 func (i *ItemsAPI) GetImageURL(itemID, imageType, tag string) string {
 	if tag == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s/Items/%s/Images/%s?tag=%s&quality=90&maxWidth=300",
+	// Use optimized parameters for faster loading and better quality
+	return fmt.Sprintf("%s/Items/%s/Images/%s?tag=%s&quality=85&maxWidth=400",
 		i.client.config.ServerURL, itemID, imageType, tag)
 }
 
