@@ -1,10 +1,7 @@
 package jellyfin
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 )
 
@@ -18,7 +15,7 @@ type SearchOptions struct {
 	Query     string
 	Limit     int
 	Recursive bool
-	Fields    []string // Specific fields to return for better performance
+	Fields    []string
 }
 
 // NewSearchOptions creates default search options
@@ -27,7 +24,7 @@ func NewSearchOptions(query string) *SearchOptions {
 		Query:     query,
 		Limit:     50,
 		Recursive: true,
-		Fields:    []string{"BasicSyncInfo", "PrimaryImageAspectRatio"}, // Minimal fields for performance
+		Fields:    []string{"BasicSyncInfo", "PrimaryImageAspectRatio"},
 	}
 }
 
@@ -66,43 +63,12 @@ func (s *SearchAPI) Items(options *SearchOptions) ([]Item, error) {
 		options.Limit,
 	)
 
-	req, err := http.NewRequest("GET", searchURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf(
-		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		s.client.config.ClientName,
-		s.client.config.ClientName,
-		s.client.config.DeviceID,
-		s.client.config.Version,
-		s.client.config.AccessToken,
-	))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.client.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
-	}
-
 	var response ItemsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	if err := s.client.doRequestDecode("GET", searchURL, nil, &response); err != nil {
+		return nil, err
 	}
 
-	items := make([]Item, len(response.Items))
-	for i, item := range response.Items {
-		items[i] = item
-	}
-
-	return items, nil
+	return toItems(response.Items), nil
 }
 
 // Quick performs a quick search with default options

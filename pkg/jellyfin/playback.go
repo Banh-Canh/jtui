@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 )
 
 // PlaybackAPI handles playback-related operations
@@ -13,154 +11,54 @@ type PlaybackAPI struct {
 	client *Client
 }
 
-// ReportStart reports that playback has started for progress tracking
-func (p *PlaybackAPI) ReportStart(itemID string) error {
+// reportPlayback is a shared helper for ReportStart, ReportStop, and ReportProgress
+func (p *PlaybackAPI) reportPlayback(endpoint string, data PlaybackInfo) error {
 	if !p.client.IsAuthenticated() {
 		return fmt.Errorf("client is not authenticated")
 	}
 
-	url := fmt.Sprintf("%s/Sessions/Playing", p.client.config.ServerURL)
+	url := fmt.Sprintf("%s/Sessions/Playing%s", p.client.config.ServerURL, endpoint)
 
-	playbackData := PlaybackInfo{
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal playback data: %w", err)
+	}
+
+	_, err = p.client.doRequest("POST", url, bytes.NewBuffer(jsonData))
+	return err
+}
+
+// ReportStart reports that playback has started for progress tracking
+func (p *PlaybackAPI) ReportStart(itemID string) error {
+	return p.reportPlayback("", PlaybackInfo{
 		ItemID:        itemID,
 		SessionID:     p.client.config.DeviceID,
 		MediaSourceID: itemID,
 		CanSeek:       true,
 		PlayMethod:    "DirectPlay",
-	}
-
-	jsonData, err := json.Marshal(playbackData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal playback data: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf(
-		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName,
-		p.client.config.ClientName,
-		p.client.config.DeviceID,
-		p.client.config.Version,
-		p.client.config.AccessToken,
-	))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
+	})
 }
 
 // ReportStop reports that playback has stopped and marks the item as watched
 func (p *PlaybackAPI) ReportStop(itemID string, positionTicks int64) error {
-	if !p.client.IsAuthenticated() {
-		return fmt.Errorf("client is not authenticated")
-	}
-
-	url := fmt.Sprintf("%s/Sessions/Playing/Stopped", p.client.config.ServerURL)
-
-	playbackData := PlaybackInfo{
+	return p.reportPlayback("/Stopped", PlaybackInfo{
 		ItemID:        itemID,
 		SessionID:     p.client.config.DeviceID,
 		MediaSourceID: itemID,
 		PositionTicks: positionTicks,
-	}
-
-	jsonData, err := json.Marshal(playbackData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal playback data: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf(
-		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName,
-		p.client.config.ClientName,
-		p.client.config.DeviceID,
-		p.client.config.Version,
-		p.client.config.AccessToken,
-	))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
+	})
 }
 
 // ReportProgress reports the current playback progress
 func (p *PlaybackAPI) ReportProgress(itemID string, positionTicks int64) error {
-	if !p.client.IsAuthenticated() {
-		return fmt.Errorf("client is not authenticated")
-	}
-
-	url := fmt.Sprintf("%s/Sessions/Playing/Progress", p.client.config.ServerURL)
-
-	playbackData := PlaybackInfo{
+	return p.reportPlayback("/Progress", PlaybackInfo{
 		ItemID:        itemID,
 		SessionID:     p.client.config.DeviceID,
 		MediaSourceID: itemID,
 		PositionTicks: positionTicks,
 		CanSeek:       true,
 		PlayMethod:    "DirectPlay",
-	}
-
-	jsonData, err := json.Marshal(playbackData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal playback data: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf(
-		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName,
-		p.client.config.ClientName,
-		p.client.config.DeviceID,
-		p.client.config.Version,
-		p.client.config.AccessToken,
-	))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
+	})
 }
 
 // GetStreamURL generates a stream URL for an item
@@ -175,17 +73,15 @@ func (p *PlaybackAPI) GetDownloadURL(itemID string) string {
 		p.client.config.ServerURL, itemID, p.client.config.AccessToken)
 }
 
-// GetPlaybackURL returns the appropriate URL for playback (local file or remote stream)
-// Returns the URL and a boolean indicating if it's a local file
+// GetPlaybackURL returns the appropriate URL for playback (local file or remote stream).
+// Returns the URL and a boolean indicating if it's a local file.
 func (p *PlaybackAPI) GetPlaybackURL(itemID string, item *DetailedItem) (string, bool) {
-	// First check if we have a local copy
 	if item != nil {
 		if localPath, isLocal := p.client.Download.GetLocalVideoPath(item); isLocal {
 			return localPath, true
 		}
 	}
 
-	// Fall back to remote download URL
 	return p.GetDownloadURL(itemID), false
 }
 
@@ -196,34 +92,8 @@ func (p *PlaybackAPI) MarkWatched(itemID string) error {
 	}
 
 	url := fmt.Sprintf("%s/Users/%s/PlayedItems/%s", p.client.config.ServerURL, p.client.config.UserID, itemID)
-
-	req, err := http.NewRequest("POST", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf(
-		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName,
-		p.client.config.ClientName,
-		p.client.config.DeviceID,
-		p.client.config.Version,
-		p.client.config.AccessToken,
-	))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
+	_, err := p.client.doRequest("POST", url, nil)
+	return err
 }
 
 // MarkUnwatched marks an item as unwatched
@@ -233,32 +103,6 @@ func (p *PlaybackAPI) MarkUnwatched(itemID string) error {
 	}
 
 	url := fmt.Sprintf("%s/Users/%s/PlayedItems/%s", p.client.config.ServerURL, p.client.config.UserID, itemID)
-
-	req, err := http.NewRequest("DELETE", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf(
-		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
-		p.client.config.ClientName,
-		p.client.config.ClientName,
-		p.client.config.DeviceID,
-		p.client.config.Version,
-		p.client.config.AccessToken,
-	))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.client.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to make request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	return nil
+	_, err := p.client.doRequest("DELETE", url, nil)
+	return err
 }

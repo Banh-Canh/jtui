@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,6 +32,13 @@ const (
 	FolderView
 	ItemView
 	SearchView
+)
+
+// Path constants to avoid hardcoded strings scattered throughout the code
+const (
+	mpvSocketPath     = "/tmp/jtui-mpvsocket"
+	yaziCacheDir      = "/tmp/jtui_yazi_thumbs"
+	oldThumbsCacheDir = "/tmp/jtui_thumbs"
 )
 
 type pathItem struct {
@@ -67,6 +75,15 @@ type model struct {
 	currentPlayPosition float64 // Current position in seconds
 	currentPlayDuration float64 // Total duration in seconds
 	isVideoPlaying      bool
+	// Cached track info (updated with progress tick, not in View())
+	cachedSubtitleTrack string
+	cachedAudioTrack    string
+	// Cached download status (updated when details change, not every render)
+	cachedDownloaded    bool
+	cachedDownloadSize  int64
+	cachedDownloadDirty bool // true when details changed and cache needs refresh
+	// Download queue status
+	dlQueueStatus jellyfin.QueueStatus
 }
 
 // Messages
@@ -112,10 +129,11 @@ type thumbnailLoadedMsg struct {
 }
 
 type playbackProgressMsg struct {
-	position  float64
-	duration  float64
-	isPlaying bool
-	itemName  string
+	position      float64
+	duration      float64
+	isPlaying     bool
+	subtitleTrack string
+	audioTrack    string
 }
 
 type playbackStoppedMsg struct{}
@@ -134,6 +152,10 @@ type cycleAudioMsg struct{}
 
 type clearImageMsg struct{}
 
+type downloadQueueUpdateMsg struct {
+	status jellyfin.QueueStatus
+}
+
 // Styles
 var (
 	// Modern header styles
@@ -148,18 +170,18 @@ var (
 			Bold(true)
 
 	headerTitleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#bb9af7")).
-			Bold(true)
+				Foreground(lipgloss.Color("#bb9af7")).
+				Bold(true)
 
 	headerStatusStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#9ece6a"))
-			
+				Foreground(lipgloss.Color("#9ece6a"))
+
 	headerOfflineStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#f7768e")).
-			Bold(true)
+				Foreground(lipgloss.Color("#f7768e")).
+				Bold(true)
 
 	headerDividerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#3b4261"))
+				Foreground(lipgloss.Color("#3b4261"))
 
 	// Panel title styles (updated for consistency)
 	titleStyle = lipgloss.NewStyle().
@@ -181,17 +203,12 @@ var (
 
 	infoStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#c0caf5"))
-
-	panelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#3b4261")).
-			Padding(1)
 )
 
 func Menu() {
 	// Setup cleanup on exit
 	setupCleanupHandlers()
-	
+
 	// Clean up old thumbnail cache files (like Yazi's cache management)
 	go cleanupYaziCache()
 
@@ -208,7 +225,7 @@ func Menu() {
 func MenuWithClient(client *jellyfin.Client) {
 	// Setup cleanup on exit
 	setupCleanupHandlers()
-	
+
 	// Clean up old thumbnail cache files (like Yazi's cache management)
 	go cleanupYaziCache()
 
@@ -222,60 +239,48 @@ func MenuWithClient(client *jellyfin.Client) {
 	CleanupMpvProcesses()
 }
 
-func initialModel() model {
-	client, err := jellyfin.ConnectFromConfig(func(key string) string {
-		return viper.GetString(key)
-	})
+func newModel(client *jellyfin.Client, err error) model {
 	if err != nil {
 		return model{err: err, thumbnailCache: make(map[string]string)}
 	}
 
-	// Start with a fresh cache to avoid old pixelated thumbnails
 	return model{
 		client:              client,
 		currentView:         LibraryView,
 		items:               []jellyfin.Item{},
-		cursor:              0,
 		currentPath:         []pathItem{},
-		currentDetails:      nil,
 		loading:             true,
 		width:               80,
 		height:              24,
 		viewport:            15,
-		viewportOffset:      0,
-		thumbnailCache:      make(map[string]string), // Fresh cache to force Yazi processing
-		currentPlayingItem:  nil,
-		currentPlayPosition: 0,
-		currentPlayDuration: 0,
-		isVideoPlaying:      false,
+		thumbnailCache:      make(map[string]string),
+		cachedDownloadDirty: true,
 	}
 }
 
+func initialModel() model {
+	client, err := jellyfin.ConnectFromConfig(func(key string) string {
+		return viper.GetString(key)
+	})
+	return newModel(client, err)
+}
+
 func initialModelWithClient(client *jellyfin.Client) model {
-	return model{
-		client:              client,
-		currentView:         LibraryView,
-		items:               []jellyfin.Item{},
-		cursor:              0,
-		currentPath:         []pathItem{},
-		currentDetails:      nil,
-		loading:             true,
-		width:               80,
-		height:              24,
-		viewport:            15,
-		viewportOffset:      0,
-		thumbnailCache:      make(map[string]string), // Fresh cache to force Yazi processing
-		currentPlayingItem:  nil,
-		currentPlayPosition: 0,
-		currentPlayDuration: 0,
-		isVideoPlaying:      false,
-	}
+	return newModel(client, nil)
 }
 
 func (m model) Init() tea.Cmd {
 	if m.err != nil {
 		return nil
 	}
+
+	// Set up download queue notification callback
+	m.client.Download.Queue.OnUpdate = func(status jellyfin.QueueStatus) {
+		if globalProgram != nil {
+			globalProgram.Send(downloadQueueUpdateMsg{status: status})
+		}
+	}
+
 	return tea.Batch(
 		loadLibraries(m.client),
 		createProgressUpdateCmd(),
@@ -293,16 +298,6 @@ func loadLibraries(client *jellyfin.Client) tea.Cmd {
 		}
 
 		return librariesLoadedMsg{libraries}
-	}
-}
-
-func loadFolders(client *jellyfin.Client, parentID string) tea.Cmd {
-	return func() tea.Msg {
-		folders, err := client.Libraries.GetFolders(parentID)
-		if err != nil {
-			return errMsg{err}
-		}
-		return foldersLoadedMsg{folders}
 	}
 }
 
@@ -386,6 +381,16 @@ func loadRecentlyAddedEpisodes(client *jellyfin.Client) tea.Cmd {
 	}
 }
 
+func loadDownloadedContent(client *jellyfin.Client) tea.Cmd {
+	return func() tea.Msg {
+		items, err := client.Download.DiscoverOfflineContent()
+		if err != nil {
+			return errMsg{err}
+		}
+		return itemsLoadedMsg{items}
+	}
+}
+
 func toggleWatchedStatus(client *jellyfin.Client, itemID string, currentDetails *jellyfin.DetailedItem) tea.Cmd {
 	return func() tea.Msg {
 		if currentDetails == nil {
@@ -419,7 +424,8 @@ func isVirtualFolder(itemID string) bool {
 		itemID == "virtual-next-up" ||
 		itemID == "virtual-recently-added-movies" ||
 		itemID == "virtual-recently-added-shows" ||
-		itemID == "virtual-recently-added-episodes"
+		itemID == "virtual-recently-added-episodes" ||
+		itemID == "virtual-downloaded"
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -482,6 +488,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				IsFolder: true,
 				Type:     "VirtualFolder",
 			},
+			&jellyfin.SimpleItem{
+				Name:     "Downloaded",
+				ID:       "virtual-downloaded",
+				IsFolder: true,
+				Type:     "VirtualFolder",
+			},
 		}
 		// Combine virtual directories with real libraries
 		m.items = append(virtualItems, msg.items...)
@@ -524,21 +536,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case itemDetailsLoadedMsg:
 		m.currentDetails = msg.details
+		m.cachedDownloadDirty = true // Refresh download status for new item
 
-		// Optimize cache size to prevent memory growth - use LRU-like eviction
+		// Refresh download cache immediately
+		if m.currentDetails != nil && !m.client.IsOfflineMode() {
+			if downloaded, _, err := m.client.Download.IsDownloaded(m.currentDetails); err == nil {
+				m.cachedDownloaded = downloaded
+				if downloaded {
+					if size, err := m.client.Download.GetDownloadSize(m.currentDetails); err == nil {
+						m.cachedDownloadSize = size
+					}
+				} else {
+					m.cachedDownloadSize = 0
+				}
+			}
+			m.cachedDownloadDirty = false
+		}
+
+		// Evict thumbnail cache when it gets too large
 		if len(m.thumbnailCache) > 50 {
-			// Keep only the most recent thumbnails, prioritizing current item
 			newCache := make(map[string]string)
 			currentItemID := m.currentDetails.GetID()
-			
-			// Always keep current item's thumbnail
+
 			for key, value := range m.thumbnailCache {
 				if strings.HasPrefix(key, currentItemID+"_") {
 					newCache[key] = value
 				}
 			}
-			
-			// Keep up to 30 other recent thumbnails
+
 			count := 0
 			for key, value := range m.thumbnailCache {
 				if !strings.HasPrefix(key, currentItemID+"_") && count < 30 {
@@ -579,6 +604,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thumbnailCache[msg.cacheKey] = msg.thumbnail
 		return m, nil
 
+	case downloadQueueUpdateMsg:
+		m.dlQueueStatus = msg.status
+		// Surface download failures as error messages
+		if msg.status.Failed > 0 && msg.status.LastError != "" {
+			m.err = nil // don't set fatal error
+			m.successMsg = ""
+			// Show the error inline
+			m.successMsg = fmt.Sprintf("Download failed: %s", msg.status.LastError)
+		}
+		return m, nil
+
 	case watchStatusUpdatedMsg:
 		// Update the current details to reflect the new watch status
 		if m.currentDetails != nil && m.currentDetails.GetID() == msg.itemID {
@@ -615,34 +651,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentPlayDuration = msg.duration
 		wasPlaying := m.isVideoPlaying
 		m.isVideoPlaying = msg.isPlaying
+		m.cachedSubtitleTrack = msg.subtitleTrack
+		m.cachedAudioTrack = msg.audioTrack
 
-		// If we're getting progress data but don't have a current playing item set,
-		// try to set it from current selection (handles edge cases)
 		if msg.isPlaying && m.currentPlayingItem == nil && m.currentDetails != nil {
 			m.currentPlayingItem = m.currentDetails
 		}
 
 		if !msg.isPlaying && wasPlaying {
-			// Video stopped, clear the current playing item
 			m.currentPlayingItem = nil
 			m.currentPlayPosition = 0
 			m.currentPlayDuration = 0
 		}
-		
-		// Additional check: if we think we have a playing item but can't connect to mpv,
-		// the video has probably ended
+
+		// mpv socket is likely gone - video ended
 		if m.currentPlayingItem != nil && !msg.isPlaying && msg.position == 0 && msg.duration == 0 {
-			// mpv socket is likely gone - video ended
 			m.currentPlayingItem = nil
 			m.isVideoPlaying = false
 			m.currentPlayPosition = 0
 			m.currentPlayDuration = 0
 		}
-		
-		// Continue updating progress if:
-		// 1. Something is currently playing
-		// 2. Something was just playing (to detect stop)
-		// 3. We have a currentPlayingItem set (shows progress bar even if detection is flaky)
+
 		if msg.isPlaying || wasPlaying || m.currentPlayingItem != nil {
 			return m, createProgressUpdateCmd()
 		}
@@ -885,9 +914,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchQuery = ""
 			return m, nil
 		case "d":
-			// Download video
-			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil {
-				return m, downloadVideo(m.client, m.currentDetails)
+			// Download: single item, season, or show
+			if len(m.items) > 0 && m.currentDetails != nil {
+				item := m.items[m.cursor]
+				if item.GetIsFolder() {
+					details := m.currentDetails
+					switch details.Type {
+					case "Season":
+						// Download all episodes of this season
+						seriesID := m.parentSeriesID()
+						return m, downloadSeason(m.client, seriesID, item.GetID(), details.GetName())
+					case "Series":
+						// Download entire show (all seasons)
+						return m, downloadShow(m.client, item.GetID(), details.GetName())
+					}
+				} else {
+					// Single item download
+					return m, downloadVideo(m.client, m.currentDetails)
+				}
+			}
+		case "D":
+			// Download entire show from anywhere (episode, season, or show view)
+			seriesID, seriesName := m.findSeriesContext()
+			if seriesID != "" {
+				return m, downloadShow(m.client, seriesID, seriesName)
 			}
 		case "x":
 			// Remove downloaded video
@@ -955,6 +1005,13 @@ func (m model) selectItem() (model, tea.Cmd) {
 			})
 			m.loading = true
 			return m, loadRecentlyAddedEpisodes(m.client)
+		} else if item.GetID() == "virtual-downloaded" {
+			m.currentPath = append(m.currentPath, pathItem{
+				name: item.GetName(),
+				id:   item.GetID(),
+			})
+			m.loading = true
+			return m, loadDownloadedContent(m.client)
 		}
 
 		// Navigate into regular folder/library
@@ -985,8 +1042,11 @@ func (m model) selectItem() (model, tea.Cmd) {
 	}
 }
 
-// Global variable to track running mpv processes
-var runningMpvProcesses []*exec.Cmd
+// Global state with mutex protection for concurrent access
+var (
+	mpvMu               sync.Mutex
+	runningMpvProcesses []*exec.Cmd
+)
 
 // Global variable to track current image for cleanup
 var globalImageArea *imageArea
@@ -1016,7 +1076,10 @@ func init() {
 func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) tea.Cmd {
 	return func() tea.Msg {
 		// Close any existing jtui-launched videos before starting a new one
-		if len(runningMpvProcesses) > 0 {
+		mpvMu.Lock()
+		hasRunning := len(runningMpvProcesses) > 0
+		mpvMu.Unlock()
+		if hasRunning {
 			CleanupMpvProcesses()
 		}
 
@@ -1051,7 +1114,7 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 
 		// Prepare mpv command with JSON IPC enabled for position tracking
 		// Use a unique socket path to identify jtui-launched processes
-		args := []string{"--input-ipc-server=/tmp/jtui-mpvsocket", "--title=jtui-player"}
+		args := []string{"--input-ipc-server=" + mpvSocketPath, "--title=jtui-player"}
 
 		// Add start position if resuming
 		if startPositionTicks > 0 {
@@ -1064,7 +1127,9 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 		cmd := exec.Command("mpv", args...)
 
 		// Add to global tracking so we can kill it on exit
+		mpvMu.Lock()
 		runningMpvProcesses = append(runningMpvProcesses, cmd)
+		mpvMu.Unlock()
 
 		// Start playback tracking in background
 		go func() {
@@ -1088,10 +1153,8 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 						case <-done:
 							return
 						case <-ticker.C:
-							if position := getMpvPosition(); position > 0 {
-								// Convert seconds to ticks (1 tick = 100 nanoseconds)
+							if position := getMpvFloatProperty("time-pos"); position > 0 {
 								positionTicks := int64(position * 10000000)
-								// Continuously sync progress to server
 								client.Playback.ReportProgress(itemID, positionTicks)
 							}
 						}
@@ -1106,24 +1169,24 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 			close(done)
 
 			// Remove from tracking list when mpv exits
+			mpvMu.Lock()
 			for i, p := range runningMpvProcesses {
 				if p == cmd {
 					runningMpvProcesses = append(runningMpvProcesses[:i], runningMpvProcesses[i+1:]...)
 					break
 				}
 			}
+			mpvMu.Unlock()
 
 			// Handle completion for both local and remote content
-			if finalPosition := getMpvPosition(); finalPosition > 0 {
+			if finalPosition := getMpvFloatProperty("time-pos"); finalPosition > 0 {
 				finalPositionTicks := int64(finalPosition * 10000000)
-				
-				// For remote content, report progress to server
+
 				if !isLocal {
 					client.Playback.ReportProgress(itemID, finalPositionTicks)
 				}
-				
-				// Check if video was completed (watched >90% of duration)
-				if finalDuration := getMpvDuration(); finalDuration > 0 {
+
+				if finalDuration := getMpvFloatProperty("duration"); finalDuration > 0 {
 					completionPercentage := (finalPosition / finalDuration) * 100
 					if completionPercentage >= 90.0 {
 						// Mark as watched (for both local and remote)
@@ -1136,7 +1199,7 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 								client.Playback.MarkWatched(itemID)
 							}
 						}
-						
+
 						// Send completion message to UI if program reference is available
 						if globalProgram != nil {
 							globalProgram.Send(videoCompletedMsg{itemID: itemID})
@@ -1150,49 +1213,87 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 	}
 }
 
-// getMpvPosition retrieves current playback position from mpv via JSON IPC
-func getMpvPosition() float64 {
-	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+// mpvIPCCommand sends a JSON IPC command to mpv and returns the parsed response.
+// It properly closes the connection before returning, avoiding deferred close leaks in loops.
+func mpvIPCCommand(command []string, bufSize int) (map[string]interface{}, error) {
+	conn, err := net.Dial("unix", mpvSocketPath)
 	if err != nil {
-		return 0
-	}
-	defer conn.Close()
-
-	// Send command to get playback position
-	command := map[string]interface{}{
-		"command": []string{"get_property", "time-pos"},
+		return nil, err
 	}
 
-	jsonData, err := json.Marshal(command)
+	payload := map[string]interface{}{"command": command}
+	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return 0
+		conn.Close()
+		return nil, err
 	}
 
 	conn.Write(append(jsonData, '\n'))
 
-	// Read response
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, bufSize)
 	n, err := conn.Read(buffer)
+	conn.Close() // Close immediately instead of deferring (safe in retry loops)
 	if err != nil {
-		return 0
+		return nil, err
 	}
 
 	var response map[string]interface{}
 	if err := json.Unmarshal(buffer[:n], &response); err != nil {
+		return nil, err
+	}
+
+	return response, nil
+}
+
+// mpvIPCCommandWithDeadline is like mpvIPCCommand but with a connection deadline.
+func mpvIPCCommandWithDeadline(command []string, bufSize int, deadline time.Duration) (map[string]interface{}, error) {
+	conn, err := net.Dial("unix", mpvSocketPath)
+	if err != nil {
+		return nil, err
+	}
+
+	conn.SetDeadline(time.Now().Add(deadline))
+
+	payload := map[string]interface{}{"command": command}
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	conn.Write(append(jsonData, '\n'))
+
+	buffer := make([]byte, bufSize)
+	n, err := conn.Read(buffer)
+	conn.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	var response map[string]interface{}
+	if err := json.Unmarshal(buffer[:n], &response); err != nil {
+		return nil, err
+	}
+
+	return response, nil
+}
+
+// getMpvFloatProperty retrieves a float64 property from mpv
+func getMpvFloatProperty(property string) float64 {
+	resp, err := mpvIPCCommand([]string{"get_property", property}, 1024)
+	if err != nil {
 		return 0
 	}
-
-	if data, ok := response["data"].(float64); ok {
+	if data, ok := resp["data"].(float64); ok {
 		return data
 	}
-
 	return 0
 }
 
-// getMpvPositionWithRetry retrieves current playback position with retry logic
-func getMpvPositionWithRetry() float64 {
+// getMpvFloatPropertyWithRetry retrieves a float64 property with retry logic
+func getMpvFloatPropertyWithRetry(property string) float64 {
 	for retry := 0; retry < 2; retry++ {
-		conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
+		resp, err := mpvIPCCommandWithDeadline([]string{"get_property", property}, 1024, 300*time.Millisecond)
 		if err != nil {
 			if retry < 1 {
 				time.Sleep(50 * time.Millisecond)
@@ -1200,185 +1301,21 @@ func getMpvPositionWithRetry() float64 {
 			}
 			return 0
 		}
-		defer conn.Close()
-
-		conn.SetDeadline(time.Now().Add(300 * time.Millisecond))
-
-		// Send command to get playback position
-		command := map[string]interface{}{
-			"command": []string{"get_property", "time-pos"},
-		}
-
-		jsonData, err := json.Marshal(command)
-		if err != nil {
-			if retry < 1 {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			return 0
-		}
-
-		conn.Write(append(jsonData, '\n'))
-
-		// Read response
-		buffer := make([]byte, 1024)
-		n, err := conn.Read(buffer)
-		if err != nil {
-			if retry < 1 {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			return 0
-		}
-
-		var response map[string]interface{}
-		if err := json.Unmarshal(buffer[:n], &response); err != nil {
-			if retry < 1 {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			return 0
-		}
-
-		if data, ok := response["data"].(float64); ok {
+		if data, ok := resp["data"].(float64); ok {
 			return data
 		}
 	}
-
 	return 0
 }
 
-// getMpvDuration retrieves total duration from mpv via JSON IPC
-func getMpvDuration() float64 {
-	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-	if err != nil {
-		return 0
-	}
-	defer conn.Close()
-
-	// Send command to get duration
-	command := map[string]interface{}{
-		"command": []string{"get_property", "duration"},
-	}
-
-	jsonData, err := json.Marshal(command)
-	if err != nil {
-		return 0
-	}
-
-	conn.Write(append(jsonData, '\n'))
-
-	// Read response
-	buffer := make([]byte, 1024)
-	n, err := conn.Read(buffer)
-	if err != nil {
-		return 0
-	}
-
-	var response map[string]interface{}
-	if err := json.Unmarshal(buffer[:n], &response); err != nil {
-		return 0
-	}
-
-	if data, ok := response["data"].(float64); ok {
-		return data
-	}
-
-	return 0
-}
-
-// getMpvDurationWithRetry retrieves total duration with retry logic
-func getMpvDurationWithRetry() float64 {
-	for retry := 0; retry < 2; retry++ {
-		conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-		if err != nil {
-			if retry < 1 {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			return 0
-		}
-		defer conn.Close()
-
-		conn.SetDeadline(time.Now().Add(300 * time.Millisecond))
-
-		// Send command to get duration
-		command := map[string]interface{}{
-			"command": []string{"get_property", "duration"},
-		}
-
-		jsonData, err := json.Marshal(command)
-		if err != nil {
-			if retry < 1 {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			return 0
-		}
-
-		conn.Write(append(jsonData, '\n'))
-
-		// Read response
-		buffer := make([]byte, 1024)
-		n, err := conn.Read(buffer)
-		if err != nil {
-			if retry < 1 {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			return 0
-		}
-
-		var response map[string]interface{}
-		if err := json.Unmarshal(buffer[:n], &response); err != nil {
-			if retry < 1 {
-				time.Sleep(50 * time.Millisecond)
-				continue
-			}
-			return 0
-		}
-
-		if data, ok := response["data"].(float64); ok {
-			return data
-		}
-	}
-
-	return 0
-}
-
-// getMpvCurrentSubtitle gets current subtitle track info from mpv via JSON IPC
-func getMpvCurrentSubtitle() string {
-	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-
-	// Send command to get current subtitle track
-	command := map[string]interface{}{
-		"command": []string{"get_property", "current-tracks/sub"},
-	}
-
-	jsonData, err := json.Marshal(command)
+// getMpvTrackInfo retrieves current track info (subtitle or audio) from mpv
+func getMpvTrackInfo(trackType, fallback string) string {
+	resp, err := mpvIPCCommand([]string{"get_property", "current-tracks/" + trackType}, 2048)
 	if err != nil {
 		return ""
 	}
 
-	conn.Write(append(jsonData, '\n'))
-
-	// Read response
-	buffer := make([]byte, 2048)
-	n, err := conn.Read(buffer)
-	if err != nil {
-		return ""
-	}
-
-	var response map[string]interface{}
-	if err := json.Unmarshal(buffer[:n], &response); err != nil {
-		return ""
-	}
-
-	if data, ok := response["data"].(map[string]interface{}); ok {
+	if data, ok := resp["data"].(map[string]interface{}); ok {
 		if title, exists := data["title"].(string); exists && title != "" {
 			return title
 		}
@@ -1390,220 +1327,70 @@ func getMpvCurrentSubtitle() string {
 		}
 	}
 
-	return "Off"
+	return fallback
 }
 
-// getMpvCurrentAudio gets current audio track info from mpv via JSON IPC
-func getMpvCurrentAudio() string {
-	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-
-	// Send command to get current audio track
-	command := map[string]interface{}{
-		"command": []string{"get_property", "current-tracks/audio"},
-	}
-
-	jsonData, err := json.Marshal(command)
-	if err != nil {
-		return ""
-	}
-
-	conn.Write(append(jsonData, '\n'))
-
-	// Read response
-	buffer := make([]byte, 2048)
-	n, err := conn.Read(buffer)
-	if err != nil {
-		return ""
-	}
-
-	var response map[string]interface{}
-	if err := json.Unmarshal(buffer[:n], &response); err != nil {
-		return ""
-	}
-
-	if data, ok := response["data"].(map[string]interface{}); ok {
-		if title, exists := data["title"].(string); exists && title != "" {
-			return title
-		}
-		if lang, exists := data["lang"].(string); exists && lang != "" {
-			return lang
-		}
-		if id, exists := data["id"].(float64); exists {
-			return fmt.Sprintf("Track %d", int(id))
-		}
-	}
-
-	return "Unknown"
-}
-
-// stopMpv sends a quit command to mpv via JSON IPC
-func stopMpv() error {
-	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	// Send quit command
-	command := map[string]interface{}{
-		"command": []string{"quit"},
-	}
-
-	jsonData, err := json.Marshal(command)
+// sendMpvCommand sends a simple command to mpv (quit, cycle, etc.)
+func sendMpvCommand(args ...string) error {
+	conn, err := net.Dial("unix", mpvSocketPath)
 	if err != nil {
 		return err
 	}
 
+	payload := map[string]interface{}{"command": args}
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+
 	conn.Write(append(jsonData, '\n'))
+	conn.Close()
 	return nil
 }
 
-// togglePauseMpv toggles pause/play state in mpv via JSON IPC
-func togglePauseMpv() error {
-	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	// Send pause toggle command
-	command := map[string]interface{}{
-		"command": []string{"cycle", "pause"},
-	}
-
-	jsonData, err := json.Marshal(command)
-	if err != nil {
-		return err
-	}
-
-	conn.Write(append(jsonData, '\n'))
-	return nil
-}
-
-// cycleSubtitleTrack cycles to the next subtitle track in mpv via JSON IPC
-func cycleSubtitleTrack() error {
-	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	// Send cycle subtitle track command
-	command := map[string]interface{}{
-		"command": []string{"cycle", "sid"},
-	}
-
-	jsonData, err := json.Marshal(command)
-	if err != nil {
-		return err
-	}
-
-	conn.Write(append(jsonData, '\n'))
-	return nil
-}
-
-// cycleAudioTrack cycles to the next audio track in mpv via JSON IPC
-func cycleAudioTrack() error {
-	conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	// Send cycle audio track command
-	command := map[string]interface{}{
-		"command": []string{"cycle", "aid"},
-	}
-
-	jsonData, err := json.Marshal(command)
-	if err != nil {
-		return err
-	}
-
-	conn.Write(append(jsonData, '\n'))
-	return nil
-}
-
-// checkMpvStatus checks if mpv is running and returns current status with retry logic
-func checkMpvStatus() (position, duration float64, isPlaying bool) {
-	// Try multiple times with short delays to account for mpv startup time
+// checkMpvStatus checks if mpv is running and returns current status with retry logic.
+// Also fetches track info to avoid querying in View().
+func checkMpvStatus() (position, duration float64, isPlaying bool, subtitleTrack, audioTrack string) {
 	maxRetries := 3
 	for retry := 0; retry < maxRetries; retry++ {
-		conn, err := net.Dial("unix", "/tmp/jtui-mpvsocket")
-		if err != nil {
-			if retry < maxRetries-1 {
-				time.Sleep(100 * time.Millisecond) // Brief delay before retry
-				continue
-			}
-			return 0, 0, false
-		}
-		defer conn.Close()
-
-		// Set a timeout for the socket operations
-		conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
-
-		// First check if mpv is paused
-		pauseCommand := map[string]interface{}{
-			"command": []string{"get_property", "pause"},
-		}
-
-		jsonData, err := json.Marshal(pauseCommand)
+		resp, err := mpvIPCCommandWithDeadline([]string{"get_property", "pause"}, 1024, 500*time.Millisecond)
 		if err != nil {
 			if retry < maxRetries-1 {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			return 0, 0, false
+			return 0, 0, false, "", ""
 		}
 
-		conn.Write(append(jsonData, '\n'))
+		isPaused, pauseOk := resp["data"].(bool)
+		position = getMpvFloatPropertyWithRetry("time-pos")
+		duration = getMpvFloatPropertyWithRetry("duration")
 
-		buffer := make([]byte, 1024)
-		n, err := conn.Read(buffer)
-		if err != nil {
-			if retry < maxRetries-1 {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-			return 0, 0, false
-		}
-
-		var pauseResponse map[string]interface{}
-		if err := json.Unmarshal(buffer[:n], &pauseResponse); err != nil {
-			if retry < maxRetries-1 {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-			return 0, 0, false
-		}
-
-		isPaused, pauseOk := pauseResponse["data"].(bool)
-		position = getMpvPositionWithRetry()
-		duration = getMpvDurationWithRetry()
-
-		// Video is considered playing if:
-		// 1. We can get pause status and it's not paused, OR
-		// 2. We have valid position/duration data (even if pause check failed)
 		videoIsPlaying := (!isPaused && pauseOk) || (position > 0 || duration > 0)
-		
-		return position, duration, videoIsPlaying
+
+		// Fetch track info here instead of in View()
+		if videoIsPlaying {
+			subtitleTrack = getMpvTrackInfo("sub", "Off")
+			audioTrack = getMpvTrackInfo("audio", "Unknown")
+		}
+
+		return position, duration, videoIsPlaying, subtitleTrack, audioTrack
 	}
-	
-	return 0, 0, false
+
+	return 0, 0, false, "", ""
 }
 
 // createProgressUpdateCmd creates a command that periodically updates playback progress
 func createProgressUpdateCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
-		position, duration, isPlaying := checkMpvStatus()
+		position, duration, isPlaying, subtitleTrack, audioTrack := checkMpvStatus()
 		return playbackProgressMsg{
-			position:  position,
-			duration:  duration,
-			isPlaying: isPlaying,
+			position:      position,
+			duration:      duration,
+			isPlaying:     isPlaying,
+			subtitleTrack: subtitleTrack,
+			audioTrack:    audioTrack,
 		}
 	})
 }
@@ -1611,11 +1398,13 @@ func createProgressUpdateCmd() tea.Cmd {
 // createDelayedProgressUpdateCmd creates a command with initial delay for mpv startup
 func createDelayedProgressUpdateCmd() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
-		position, duration, isPlaying := checkMpvStatus()
+		position, duration, isPlaying, subtitleTrack, audioTrack := checkMpvStatus()
 		return playbackProgressMsg{
-			position:  position,
-			duration:  duration,
-			isPlaying: isPlaying,
+			position:      position,
+			duration:      duration,
+			isPlaying:     isPlaying,
+			subtitleTrack: subtitleTrack,
+			audioTrack:    audioTrack,
 		}
 	})
 }
@@ -1623,8 +1412,7 @@ func createDelayedProgressUpdateCmd() tea.Cmd {
 // stopPlayback stops the currently playing video
 func stopPlayback() tea.Cmd {
 	return func() tea.Msg {
-		err := stopMpv()
-		if err != nil {
+		if err := sendMpvCommand("quit"); err != nil {
 			return errMsg{fmt.Errorf("failed to stop playback: %w", err)}
 		}
 		return stopPlaybackMsg{}
@@ -1634,8 +1422,7 @@ func stopPlayback() tea.Cmd {
 // togglePause toggles pause/play state of the currently playing video
 func togglePause() tea.Cmd {
 	return func() tea.Msg {
-		err := togglePauseMpv()
-		if err != nil {
+		if err := sendMpvCommand("cycle", "pause"); err != nil {
 			return errMsg{fmt.Errorf("failed to toggle pause: %w", err)}
 		}
 		return togglePauseMsg{}
@@ -1645,8 +1432,7 @@ func togglePause() tea.Cmd {
 // cycleSub cycles to the next subtitle track
 func cycleSub() tea.Cmd {
 	return func() tea.Msg {
-		err := cycleSubtitleTrack()
-		if err != nil {
+		if err := sendMpvCommand("cycle", "sid"); err != nil {
 			return errMsg{fmt.Errorf("failed to cycle subtitles: %w", err)}
 		}
 		return cycleSubtitleMsg{}
@@ -1656,35 +1442,73 @@ func cycleSub() tea.Cmd {
 // cycleAudio cycles to the next audio track
 func cycleAudio() tea.Cmd {
 	return func() tea.Msg {
-		err := cycleAudioTrack()
-		if err != nil {
+		if err := sendMpvCommand("cycle", "aid"); err != nil {
 			return errMsg{fmt.Errorf("failed to cycle audio: %w", err)}
 		}
 		return cycleAudioMsg{}
 	}
 }
 
-// downloadVideo downloads a video file for offline viewing
+// downloadVideo adds a video to the download queue (non-blocking)
 func downloadVideo(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cmd {
 	return func() tea.Msg {
+		// Items from the Downloaded view already exist locally
+		if strings.HasPrefix(item.GetID(), "offline-") {
+			return successMsg{fmt.Sprintf("Already downloaded: %s", item.Name)}
+		}
+
 		// Check if already downloaded
 		if downloaded, filePath, err := client.Download.IsDownloaded(item); err == nil && downloaded {
-			return successMsg{fmt.Sprintf("✓ Video already downloaded: %s", filepath.Base(filePath))}
+			return successMsg{fmt.Sprintf("Already downloaded: %s", filepath.Base(filePath))}
 		}
 
-		// Start download with progress tracking
-		err := client.Download.DownloadVideo(item, func(downloaded, total int64) {
-			// Progress callback - for now just log, could be enhanced with progress display
-			if total > 0 {
-				percentage := float64(downloaded) / float64(total) * 100
-				fmt.Printf("\rDownloading: %.1f%%", percentage)
-			}
-		})
+		err := client.Download.EnqueueItem(item)
 		if err != nil {
-			return errMsg{fmt.Errorf("download failed: %w", err)}
+			if err.Error() == "item already in queue" {
+				return successMsg{fmt.Sprintf("Already in queue: %s", item.Name)}
+			}
+			return errMsg{fmt.Errorf("failed to enqueue download: %w", err)}
 		}
 
-		return successMsg{fmt.Sprintf("✓ Downloaded: %s", item.Name)}
+		return successMsg{fmt.Sprintf("Queued: %s", item.Name)}
+	}
+}
+
+// downloadShow adds all episodes of a show to the download queue
+func downloadShow(client *jellyfin.Client, seriesID, seriesName string) tea.Cmd {
+	return func() tea.Msg {
+		// Don't re-download offline series
+		if strings.HasPrefix(seriesID, "offline-") {
+			return successMsg{fmt.Sprintf("%s is already downloaded", seriesName)}
+		}
+
+		count, err := client.Download.EnqueueShow(seriesID, seriesName)
+		if err != nil {
+			return errMsg{fmt.Errorf("failed to enqueue show: %w", err)}
+		}
+		if count == 0 {
+			return successMsg{fmt.Sprintf("All episodes of %s already downloaded", seriesName)}
+		}
+		return successMsg{fmt.Sprintf("Queued %d episodes of %s", count, seriesName)}
+	}
+}
+
+// downloadSeason adds all episodes of a season to the download queue
+func downloadSeason(client *jellyfin.Client, seriesID, seasonID, seriesName string) tea.Cmd {
+	return func() tea.Msg {
+		// Don't re-download offline seasons
+		if strings.HasPrefix(seasonID, "offline-") {
+			return successMsg{fmt.Sprintf("Already downloaded")}
+		}
+
+		count, err := client.Download.EnqueueSeason(seriesID, seasonID, seriesName)
+		if err != nil {
+			return errMsg{fmt.Errorf("failed to enqueue season: %w", err)}
+		}
+		if count == 0 {
+			return successMsg{fmt.Sprintf("All episodes already downloaded")}
+		}
+		return successMsg{fmt.Sprintf("Queued %d episodes", count)}
 	}
 }
 
@@ -1702,12 +1526,12 @@ func removeDownload(client *jellyfin.Client, item *jellyfin.DetailedItem) tea.Cm
 
 // yaziThumbnailConfig holds configuration for Yazi-style image processing
 type yaziThumbnailConfig struct {
-	filter      resize.InterpolationFunction
-	quality     int
-	maxWidth    int
-	maxHeight   int
-	minWidth    int
-	minHeight   int
+	filter    resize.InterpolationFunction
+	quality   int
+	maxWidth  int
+	maxHeight int
+	minWidth  int
+	minHeight int
 }
 
 // getYaziConfig returns Yazi-inspired configuration for high-quality thumbnails
@@ -1769,7 +1593,7 @@ func renderYaziStyleThumbnail(imageURL string, width, height int, itemID string)
 	}
 
 	// Check for persistent cache file first (Yazi-style caching)
-	cacheDir := "/tmp/jtui_yazi_thumbs"
+	cacheDir := yaziCacheDir
 	os.MkdirAll(cacheDir, 0o755)
 	cacheFile := fmt.Sprintf("%s/%s_%dx%d_yazi.txt", cacheDir, itemID, width, height)
 
@@ -1779,9 +1603,8 @@ func renderYaziStyleThumbnail(imageURL string, width, height int, itemID string)
 	}
 
 	// Download and process image with Yazi-inspired quality handling
-	// Create a processed file that's scaled exactly for terminal output
 	processedFile := fmt.Sprintf("/tmp/jtui_yazi_%s_%dx%d.jpg", itemID, width, height)
-	
+
 	// Check if processed image already exists for this exact size
 	if _, err := os.Stat(processedFile); os.IsNotExist(err) {
 		if err := downloadAndProcessImageForTerminal(imageURL, processedFile, width, height, config); err != nil {
@@ -1821,10 +1644,10 @@ func renderKittyImageAt(imageURL string, x, y, width, height int, itemID string)
 	}
 
 	config := getYaziConfig()
-	
+
 	// Create processed file for this exact position and size
 	processedFile := fmt.Sprintf("/tmp/jtui_kitty_%s_%dx%d.jpg", itemID, width, height)
-	
+
 	// Check if processed image already exists
 	if _, err := os.Stat(processedFile); os.IsNotExist(err) {
 		if err := downloadAndProcessImageForTerminal(imageURL, processedFile, width, height, config); err != nil {
@@ -1849,11 +1672,11 @@ func renderKittyImageAt(imageURL string, x, y, width, height int, itemID string)
 	for row := 0; row < height; row++ {
 		fmt.Printf("\x1b[%d;%dH%s", y+row+1, x+1, strings.Repeat(" ", width))
 	}
-	
+
 	// Position cursor and write Kitty image data
 	fmt.Printf("\x1b[%d;%dH", y+1, x+1)
 	fmt.Print(kittyData)
-	
+
 	return nil
 }
 
@@ -1862,12 +1685,12 @@ func clearImageArea(area *imageArea) {
 	if area == nil {
 		return
 	}
-	
+
 	// Clear the area with spaces (like Yazi's erase function)
 	for row := 0; row < area.height; row++ {
 		fmt.Printf("\x1b[%d;%dH%s", area.y+row+1, area.x+1, strings.Repeat(" ", area.width))
 	}
-	
+
 	// Send Kitty protocol delete command
 	fmt.Print("\x1b_Gq=2,a=d,d=A\x1b\\")
 }
@@ -1892,15 +1715,15 @@ func (m model) renderKittyImage(leftWidth, rightWidth, contentHeight int) {
 
 	// Calculate the position in the right panel (accounting for header, borders and title)
 	// Right panel starts at leftWidth + borders
-	rightPanelX := leftWidth + 2  // Account for left border
-	rightPanelY := 4              // Account for header, top border and title
-	
+	rightPanelX := leftWidth + 2 // Account for left border
+	rightPanelY := 4             // Account for header, top border and title
+
 	// Calculate image dimensions (similar to renderDetails logic)
 	maxLines := contentHeight - 2
 	if maxLines <= 12 {
 		return // Not enough space
 	}
-	
+
 	thumbWidth := rightWidth - 4 // Account for borders
 	if thumbWidth > 40 {
 		thumbWidth = 40
@@ -1908,7 +1731,7 @@ func (m model) renderKittyImage(leftWidth, rightWidth, contentHeight int) {
 	if thumbWidth < 25 {
 		thumbWidth = 25
 	}
-	
+
 	thumbHeight := (maxLines * 9) / 20
 	if thumbHeight > 15 {
 		thumbHeight = 15
@@ -1959,9 +1782,9 @@ func downloadAndProcessImageForTerminal(imageURL, outputPath string, termWidth, 
 
 	// Calculate optimal pixel dimensions for terminal characters
 	// Use more accurate character dimensions for better image quality
-	targetPixelWidth := termWidth * 9   // More accurate character width
+	targetPixelWidth := termWidth * 9    // More accurate character width
 	targetPixelHeight := termHeight * 18 // More accurate character height (halfblock)
-	
+
 	// Calculate target dimensions while preserving aspect ratio (Yazi approach)
 	targetWidth, targetHeight := calculateYaziDimensions(origWidth, origHeight, targetPixelWidth, targetPixelHeight)
 
@@ -2011,13 +1834,9 @@ func calculateYaziDimensions(origWidth, origHeight, maxWidth, maxHeight int) (in
 
 // cleanupYaziCache removes old thumbnail cache files to prevent disk space issues
 func cleanupYaziCache() {
-	// Clean up old Yazi cache with improved efficiency
-	yaziCacheDir := "/tmp/jtui_yazi_thumbs"
+	// Clean up old Yazi cache
 	if _, err := os.Stat(yaziCacheDir); err == nil {
-		// Remove cache files older than 48 hours for better performance (less frequent cleanup)
 		cutoff := time.Now().Add(-48 * time.Hour)
-		
-		// Use more efficient directory reading
 		entries, err := os.ReadDir(yaziCacheDir)
 		if err == nil {
 			for _, entry := range entries {
@@ -2030,22 +1849,19 @@ func cleanupYaziCache() {
 		}
 	}
 
-	// Clean up old non-Yazi cache directory completely to force fresh generation
-	oldCacheDir := "/tmp/jtui_thumbs"
-	if _, err := os.Stat(oldCacheDir); err == nil {
-		os.RemoveAll(oldCacheDir) // Remove all old cache files
+	// Clean up old non-Yazi cache directory completely
+	if _, err := os.Stat(oldThumbsCacheDir); err == nil {
+		os.RemoveAll(oldThumbsCacheDir)
 	}
 
-	// Also clean up processed images older than 2 hours (extended for better performance)
+	// Also clean up processed images older than 2 hours
 	imageCutoff := time.Now().Add(-2 * time.Hour)
-	
-	// Use more efficient cleanup for /tmp directory
 	tmpEntries, err := os.ReadDir("/tmp")
 	if err == nil {
 		for _, entry := range tmpEntries {
 			name := entry.Name()
-			if !entry.IsDir() && 
-				(strings.HasPrefix(name, "jtui_yazi_") || strings.HasPrefix(name, "jtui_img_") || strings.HasPrefix(name, "jtui_kitty_")) && 
+			if !entry.IsDir() &&
+				(strings.HasPrefix(name, "jtui_yazi_") || strings.HasPrefix(name, "jtui_img_") || strings.HasPrefix(name, "jtui_kitty_")) &&
 				strings.HasSuffix(name, ".jpg") {
 				if info, err := entry.Info(); err == nil && info.ModTime().Before(imageCutoff) {
 					os.Remove(filepath.Join("/tmp", name))
@@ -2054,8 +1870,6 @@ func cleanupYaziCache() {
 		}
 	}
 }
-
-
 
 func (m model) goBack() (model, tea.Cmd) {
 	if len(m.currentPath) == 0 {
@@ -2066,16 +1880,80 @@ func (m model) goBack() (model, tea.Cmd) {
 	m.currentPath = m.currentPath[:len(m.currentPath)-1]
 
 	if len(m.currentPath) == 0 {
-		// Back to libraries
+		// Back to root libraries
 		m.currentView = LibraryView
 		m.loading = true
 		return m, loadLibraries(m.client)
-	} else {
-		// Back to parent folder
-		parentID := m.currentPath[len(m.currentPath)-1].id
-		m.loading = true
+	}
+
+	// Back to parent folder
+	parentID := m.currentPath[len(m.currentPath)-1].id
+	m.loading = true
+
+	// Route virtual folders to their proper loaders
+	switch parentID {
+	case "virtual-continue-watching":
+		return m, loadContinueWatching(m.client)
+	case "virtual-next-up":
+		return m, loadNextUp(m.client)
+	case "virtual-recently-added-movies":
+		return m, loadRecentlyAddedMovies(m.client)
+	case "virtual-recently-added-shows":
+		return m, loadRecentlyAddedShows(m.client)
+	case "virtual-recently-added-episodes":
+		return m, loadRecentlyAddedEpisodes(m.client)
+	case "virtual-downloaded":
+		return m, loadDownloadedContent(m.client)
+	default:
 		return m, loadItems(m.client, parentID, true)
 	}
+}
+
+// parentSeriesID returns the series ID from the navigation path.
+// When inside a show, the last item in currentPath is the series.
+func (m model) parentSeriesID() string {
+	if len(m.currentPath) >= 1 {
+		return m.currentPath[len(m.currentPath)-1].id
+	}
+	return ""
+}
+
+// findSeriesContext finds the series ID and name from the current navigation state.
+// Works when viewing a show, season, or episode.
+func (m model) findSeriesContext() (string, string) {
+	if m.currentDetails == nil {
+		return "", ""
+	}
+
+	details := m.currentDetails
+
+	// If we're at show level, the selected item IS the series
+	if details.Type == "Series" {
+		return m.items[m.cursor].GetID(), details.GetName()
+	}
+
+	// If we're at season level, parent path is the series
+	if details.Type == "Season" && len(m.currentPath) >= 1 {
+		seriesItem := m.currentPath[len(m.currentPath)-1]
+		return seriesItem.id, seriesItem.name
+	}
+
+	// If we're at episode level, get series from episode metadata
+	if details.Type == "Episode" && details.GetSeriesName() != "" {
+		// Walk up the path to find the series ID
+		for i := len(m.currentPath) - 1; i >= 0; i-- {
+			if m.currentPath[i].name == details.GetSeriesName() {
+				return m.currentPath[i].id, details.GetSeriesName()
+			}
+		}
+		// Fallback: last path entry is usually the series
+		if len(m.currentPath) >= 1 {
+			seriesItem := m.currentPath[len(m.currentPath)-1]
+			return seriesItem.id, seriesItem.name
+		}
+	}
+
+	return "", ""
 }
 
 func (m *model) updateViewport() {
@@ -2242,29 +2120,38 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 
 		// Add watched icon based on watch status and download status
 		watchedIcon := "   "
-		if detailedItem, ok := item.(jellyfin.DetailedItem); ok {
+		isOfflineItem := strings.HasPrefix(item.GetID(), "offline-")
+
+		// Try to get detailed info (handle both value and pointer types)
+		var detailedItem jellyfin.DetailedItem
+		switch di := item.(type) {
+		case jellyfin.DetailedItem:
+			detailedItem = di
+		case *jellyfin.DetailedItem:
+			detailedItem = *di
+		}
+
+		if detailedItem.Type != "" {
 			if !item.GetIsFolder() {
-				// In offline mode, all items are already downloaded
-				if m.client.IsOfflineMode() {
+				if isOfflineItem || m.client.IsOfflineMode() {
 					if detailedItem.IsWatched() {
-						watchedIcon = " 💾✅ " // Downloaded and watched
+						watchedIcon = " 💾✅ "
 					} else if detailedItem.HasResumePosition() {
-						watchedIcon = " 💾⏸️ " // Downloaded with resume
+						watchedIcon = " 💾⏸️ "
 					} else {
-						watchedIcon = " 💾 " // Downloaded
+						watchedIcon = " 💾 "
 					}
 				} else {
-					// Check if downloaded first (only in online mode)
+					// Online mode - check download status
 					if downloaded, _, err := m.client.Download.IsDownloaded(&detailedItem); err == nil && downloaded {
 						if detailedItem.IsWatched() {
-							watchedIcon = " 💾✅ " // Downloaded and watched
+							watchedIcon = " 💾✅ "
 						} else if detailedItem.HasResumePosition() {
-							watchedIcon = " 💾⏸️ " // Downloaded with resume
+							watchedIcon = " 💾⏸️ "
 						} else {
-							watchedIcon = " 💾 " // Downloaded
+							watchedIcon = " 💾 "
 						}
 					} else {
-						// Not downloaded - show normal status
 						if detailedItem.IsWatched() {
 							watchedIcon = " ✅ "
 						} else if detailedItem.HasResumePosition() {
@@ -2275,7 +2162,7 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 					}
 				}
 			} else {
-				// Folders - show watched if all content is watched, partial if some watched
+				// Folders
 				if detailedItem.IsWatched() {
 					watchedIcon = " ✅ "
 				} else if detailedItem.HasResumePosition() {
@@ -2354,6 +2241,10 @@ func (m model) renderDetails(width, height int) string {
 				return infoStyle.Render(
 					"Recently Added Episodes\n\nShows the latest episodes added to your library.\nPress Enter to browse recently added episodes.",
 				)
+			case "virtual-downloaded":
+				return infoStyle.Render(
+					"Downloaded\n\nBrowse your downloaded movies and shows.\nAvailable offline without a server connection.\nPress Enter to view downloads.",
+				)
 			}
 		}
 		return dimStyle.Render("Select an item to view details")
@@ -2382,14 +2273,14 @@ func (m model) renderDetails(width, height int) string {
 		if imageSpace < 10 {
 			imageSpace = 10
 		}
-		
+
 		// Add placeholder lines for image space
 		for i := 0; i < imageSpace; i++ {
 			details.WriteString(" \n") // Space placeholder for image
 		}
 		details.WriteString("\n")
 		linesUsed += imageSpace + 1
-		
+
 		if linesUsed >= maxLines {
 			return details.String()
 		}
@@ -2482,16 +2373,15 @@ func (m model) renderDetails(width, height int) string {
 	}
 
 	// Download status
-	if m.client.IsOfflineMode() {
-		// In offline mode, all content is already downloaded
-		details.WriteString(infoStyle.Render("💾 Downloaded (Offline Mode)"))
+	if m.client.IsOfflineMode() || strings.HasPrefix(m.currentDetails.GetID(), "offline-") {
+		details.WriteString(infoStyle.Render("💾 Downloaded"))
 		details.WriteString("\n")
 		linesUsed++
 		if linesUsed >= maxLines {
 			return details.String()
 		}
 	} else {
-		// Only check download status in online mode
+		// Check download status in online mode
 		if downloaded, _, err := m.client.Download.IsDownloaded(m.currentDetails); err == nil {
 			if downloaded {
 				details.WriteString(infoStyle.Render("💾 Downloaded"))
@@ -2597,16 +2487,16 @@ func formatFileSize(bytes int64) string {
 
 // CleanupMpvProcesses kills any running jtui-launched mpv processes
 func CleanupMpvProcesses() {
+	mpvMu.Lock()
+	defer mpvMu.Unlock()
+
 	for _, cmd := range runningMpvProcesses {
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}
 	}
-	// Clear the tracking list
 	runningMpvProcesses = nil
-
-	// Also clean up the socket file to prevent conflicts
-	os.Remove("/tmp/jtui-mpvsocket")
+	os.Remove(mpvSocketPath)
 }
 
 // setupCleanupHandlers sets up signal handlers to cleanup mpv processes on exit
@@ -2631,10 +2521,11 @@ var helpText = strings.Join([]string{
 	"p/Space: play/pause",
 	"r: resume",
 	"s: stop",
-	"u: cycle subs (🔊💬 indicator shows active tracks)",
+	"u: cycle subs",
 	"a: cycle audio",
 	"w: toggle watched",
-	"d: download",
+	"d: download (item/season/show)",
+	"D: download entire show",
 	"x: remove download",
 	"/: search",
 	"q: quit",
@@ -2658,9 +2549,15 @@ func (m model) renderProgressBar() string {
 	currentTime := formatSeconds(m.currentPlayPosition)
 	totalTime := formatSeconds(m.currentPlayDuration)
 
-	// Get current track information
-	currentSub := getMpvCurrentSubtitle()
-	currentAudio := getMpvCurrentAudio()
+	// Use cached track info (updated by checkMpvStatus during progress tick)
+	currentSub := m.cachedSubtitleTrack
+	if currentSub == "" {
+		currentSub = "Off"
+	}
+	currentAudio := m.cachedAudioTrack
+	if currentAudio == "" {
+		currentAudio = "Unknown"
+	}
 
 	// Format track indicators
 	var trackInfo string
@@ -2758,7 +2655,7 @@ func formatSeconds(seconds float64) string {
 func (m model) renderHeader() string {
 	// App title with modern styling
 	appName := headerTitleStyle.Render("󰚯 JTUI")
-	
+
 	// Connection status
 	var status string
 	if m.client.IsOfflineMode() {
@@ -2766,7 +2663,33 @@ func (m model) renderHeader() string {
 	} else {
 		status = headerStatusStyle.Render("󰈀 ONLINE")
 	}
-	
+
+	// Download queue status
+	if qs := m.dlQueueStatus; qs.Active > 0 || qs.Pending > 0 || qs.Failed > 0 {
+		var dlInfo string
+		if qs.Active > 0 {
+			dlInfo = fmt.Sprintf("󰓥 %s (%.0f%%)", qs.CurrentName, qs.CurrentPct)
+			remaining := qs.Pending
+			if remaining > 0 {
+				dlInfo += fmt.Sprintf(" +%d queued", remaining)
+			}
+		} else if qs.Pending > 0 {
+			dlInfo = fmt.Sprintf("󰓥 %d queued", qs.Pending)
+		}
+		if qs.Failed > 0 {
+			if dlInfo != "" {
+				dlInfo += fmt.Sprintf(" | %d failed", qs.Failed)
+			} else {
+				dlInfo = fmt.Sprintf("%d downloads failed", qs.Failed)
+			}
+		}
+		dlWidth := m.width / 3
+		if len(dlInfo) > dlWidth && dlWidth > 6 {
+			dlInfo = dlInfo[:dlWidth-3] + "..."
+		}
+		status = headerStatusStyle.Render(dlInfo)
+	}
+
 	// Current path/view indicator
 	var currentLocation string
 	switch m.currentView {
@@ -2785,20 +2708,20 @@ func (m model) renderHeader() string {
 			currentLocation = "󰉕 Content"
 		}
 	}
-	
+
 	// Create dividers
 	divider := headerDividerStyle.Render(" │ ")
-	
+
 	// Build header content
 	leftSide := appName + divider + currentLocation
 	rightSide := status
-	
+
 	// Calculate spacing
 	usedSpace := lipgloss.Width(leftSide) + lipgloss.Width(rightSide)
-	spacer := strings.Repeat(" ", max(1, m.width-usedSpace-4)) // -4 for padding
-	
+	spacer := strings.Repeat(" ", max(1, m.width-usedSpace-4))
+
 	headerContent := leftSide + spacer + rightSide
-	
+
 	return headerStyle.Width(m.width).Render(headerContent)
 }
 
@@ -2810,12 +2733,4 @@ func (m model) renderHelp() string {
 	}
 
 	return dimStyle.Render(helpText)
-}
-
-// Helper function for max calculation
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

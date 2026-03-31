@@ -23,7 +23,7 @@ type AuthAPI struct {
 func (a *AuthAPI) TestConnection() error {
 	resp, err := a.client.http.Get(a.client.config.ServerURL + "/System/Info")
 	if err != nil {
-		return fmt.Errorf("basic HTTP test failed: %v", err)
+		return fmt.Errorf("basic HTTP test failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -40,14 +40,14 @@ func (a *AuthAPI) CheckQuickConnectEnabled() (bool, error) {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return false, fmt.Errorf("failed to create request: %v", err)
+		return false, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("User-Agent", fmt.Sprintf("%s/%s", a.client.config.ClientName, a.client.config.Version))
 
 	resp, err := a.client.http.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("failed to make request: %v", err)
+		return false, fmt.Errorf("failed to make request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -57,7 +57,7 @@ func (a *AuthAPI) CheckQuickConnectEnabled() (bool, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return false, fmt.Errorf("failed to read response: %v", err)
+		return false, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	return string(body) == "true", nil
@@ -92,7 +92,7 @@ func (a *AuthAPI) InitiateQuickConnect() (*QuickConnectData, error) {
 		lastErr = err
 	}
 
-	return nil, fmt.Errorf("all Quick Connect initiation methods failed, last error: %v", lastErr)
+	return nil, fmt.Errorf("all Quick Connect initiation methods failed, last error: %w", lastErr)
 }
 
 // tryQuickConnectMethod attempts Quick Connect initiation with a specific HTTP method
@@ -104,7 +104,7 @@ func (a *AuthAPI) tryQuickConnectMethod(method, url string, body []byte) (*Quick
 
 	req, err := http.NewRequest(method, url, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	if body != nil {
@@ -116,13 +116,13 @@ func (a *AuthAPI) tryQuickConnectMethod(method, url string, body []byte) (*Quick
 
 	resp, err := a.client.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %v", err)
+		return nil, fmt.Errorf("failed to make request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -131,7 +131,7 @@ func (a *AuthAPI) tryQuickConnectMethod(method, url string, body []byte) (*Quick
 
 	var result map[string]interface{}
 	if err := json.Unmarshal(responseBody, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
+		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	code, _ := result["Code"].(string)
@@ -150,7 +150,7 @@ func (a *AuthAPI) CheckQuickConnectStatus(secret string) (bool, error) {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return false, fmt.Errorf("failed to create request: %v", err)
+		return false, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("User-Agent", fmt.Sprintf("%s/%s", a.client.config.ClientName, a.client.config.Version))
@@ -158,7 +158,7 @@ func (a *AuthAPI) CheckQuickConnectStatus(secret string) (bool, error) {
 
 	resp, err := a.client.http.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("failed to make request: %v", err)
+		return false, fmt.Errorf("failed to make request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -168,12 +168,12 @@ func (a *AuthAPI) CheckQuickConnectStatus(secret string) (bool, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return false, fmt.Errorf("failed to read response: %v", err)
+		return false, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	var quickConnectResponse QuickConnectStatus
 	if err := json.Unmarshal(body, &quickConnectResponse); err != nil {
-		return false, fmt.Errorf("failed to parse response: %v", err)
+		return false, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	return quickConnectResponse.Authenticated, nil
@@ -189,12 +189,12 @@ func (a *AuthAPI) CompleteQuickConnect(secret string) (string, string, error) {
 
 	jsonBody, err := json.Marshal(requestBody)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to marshal request: %v", err)
+		return "", "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		return "", "", fmt.Errorf("failed to create request: %v", err)
+		return "", "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -203,7 +203,7 @@ func (a *AuthAPI) CompleteQuickConnect(secret string) (string, string, error) {
 
 	resp, err := a.client.http.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to make request: %v", err)
+		return "", "", fmt.Errorf("failed to make request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -214,12 +214,12 @@ func (a *AuthAPI) CompleteQuickConnect(secret string) (string, string, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to read response: %v", err)
+		return "", "", fmt.Errorf("failed to read response: %w", err)
 	}
 
 	var result AuthenticationResult
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", "", fmt.Errorf("failed to parse response: %v", err)
+		return "", "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if result.AccessToken == "" {
@@ -235,30 +235,22 @@ func (a *AuthAPI) CompleteQuickConnect(secret string) (string, string, error) {
 
 // AuthenticateWithQuickConnect performs the complete Quick Connect authentication flow
 func (a *AuthAPI) AuthenticateWithQuickConnect() error {
-	// Check if Quick Connect is enabled
 	enabled, err := a.CheckQuickConnectEnabled()
 	if err != nil {
-		return fmt.Errorf("failed to check Quick Connect status: %v", err)
+		return fmt.Errorf("failed to check Quick Connect status: %w", err)
 	}
 
 	if !enabled {
-		fmt.Println("❌ Quick Connect is not enabled on this server")
-		fmt.Println("Please enable Quick Connect in your Jellyfin server settings:")
-		fmt.Println("Dashboard → General → Quick Connect → Enable")
-		return fmt.Errorf("Quick Connect is disabled on server")
+		return fmt.Errorf("Quick Connect is not enabled on this server, enable it in Dashboard > General > Quick Connect")
 	}
 
-	// Initiate Quick Connect
 	quickConnectData, err := a.InitiateQuickConnect()
 	if err != nil {
-		return fmt.Errorf("Quick Connect initiation failed: %v", err)
+		return fmt.Errorf("Quick Connect initiation failed: %w", err)
 	}
 
-	fmt.Printf("\nPlease enter this code in your Jellyfin app:\n")
-	fmt.Printf("\n    CODE: %s\n", quickConnectData.Code)
-	fmt.Printf("\nWaiting for approval (60 second timeout)...\n")
+	fmt.Printf("\nPlease enter this code in your Jellyfin app:\n\n    CODE: %s\n\nWaiting for approval (60 second timeout)...\n", quickConnectData.Code)
 
-	// Poll for completion
 	timeout := time.Now().Add(60 * time.Second)
 	for time.Now().Before(timeout) {
 		authenticated, err := a.CheckQuickConnectStatus(quickConnectData.Secret)
@@ -268,25 +260,21 @@ func (a *AuthAPI) AuthenticateWithQuickConnect() error {
 		}
 
 		if authenticated {
-			fmt.Println("\n✅ Quick Connect approved!")
-
 			accessToken, userID, err := a.CompleteQuickConnect(quickConnectData.Secret)
 			if err != nil {
-				return fmt.Errorf("failed to complete Quick Connect: %v", err)
+				return fmt.Errorf("failed to complete Quick Connect: %w", err)
 			}
 
 			a.client.config.AccessToken = accessToken
 			a.client.config.UserID = userID
 
-			fmt.Printf("Successfully authenticated!\n")
 			return nil
 		}
 
 		time.Sleep(2 * time.Second)
 	}
 
-	fmt.Println("\n❌ Quick Connect timed out after 60 seconds")
-	return fmt.Errorf("Quick Connect authentication timed out")
+	return fmt.Errorf("Quick Connect authentication timed out after 60 seconds")
 }
 
 // ValidateSession validates the current authentication session
@@ -299,7 +287,7 @@ func (a *AuthAPI) ValidateSession() error {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create validation request: %v", err)
+		return fmt.Errorf("failed to create validation request: %w", err)
 	}
 
 	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Token=\"%s\"", a.client.config.AccessToken))
@@ -307,7 +295,7 @@ func (a *AuthAPI) ValidateSession() error {
 
 	resp, err := a.client.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("validation request failed: %v", err)
+		return fmt.Errorf("validation request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -331,7 +319,7 @@ func (a *AuthAPI) LoadSession() error {
 
 	content, err := os.ReadFile(sessionFile)
 	if err != nil {
-		return fmt.Errorf("failed to read session file: %v", err)
+		return fmt.Errorf("failed to read session file: %w", err)
 	}
 
 	// Try to parse as JSON for new format
@@ -344,7 +332,7 @@ func (a *AuthAPI) LoadSession() error {
 		a.client.config.AccessToken = strings.TrimSpace(string(content))
 		// Need to get userID by validating
 		if err := a.validateAndUpdateSession(); err != nil {
-			return fmt.Errorf("failed to validate session and get userID: %v", err)
+			return fmt.Errorf("failed to validate session and get userID: %w", err)
 		}
 	}
 
@@ -359,7 +347,7 @@ func (a *AuthAPI) SaveSession() error {
 
 	sessionDir := filepath.Join(xdg.CacheHome, a.client.config.ClientName)
 	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
-		return fmt.Errorf("failed to create session directory: %v", err)
+		return fmt.Errorf("failed to create session directory: %w", err)
 	}
 
 	sessionData := SessionData{
@@ -369,7 +357,7 @@ func (a *AuthAPI) SaveSession() error {
 
 	jsonData, err := json.Marshal(sessionData)
 	if err != nil {
-		return fmt.Errorf("failed to marshal session data: %v", err)
+		return fmt.Errorf("failed to marshal session data: %w", err)
 	}
 
 	sessionFile := filepath.Join(sessionDir, "session.txt")
@@ -382,7 +370,7 @@ func (a *AuthAPI) validateAndUpdateSession() error {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create user info request: %v", err)
+		return fmt.Errorf("failed to create user info request: %w", err)
 	}
 
 	req.Header.Set("X-Emby-Token", a.client.config.AccessToken)
@@ -390,7 +378,7 @@ func (a *AuthAPI) validateAndUpdateSession() error {
 
 	resp, err := a.client.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("user info request failed: %v", err)
+		return fmt.Errorf("user info request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -400,7 +388,7 @@ func (a *AuthAPI) validateAndUpdateSession() error {
 
 	var userInfo UserInfo
 	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
-		return fmt.Errorf("failed to decode user info: %v", err)
+		return fmt.Errorf("failed to decode user info: %w", err)
 	}
 
 	a.client.config.UserID = userInfo.ID
