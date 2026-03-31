@@ -2,7 +2,9 @@
 package jellyfin
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -72,7 +74,19 @@ func NewClient(config *Config) *Client {
 	client.Items = &ItemsAPI{client: client}
 	client.Playback = &PlaybackAPI{client: client}
 	client.Search = &SearchAPI{client: client}
-	client.Download = &DownloadAPI{client: client}
+	client.Download = &DownloadAPI{
+		client: client,
+		Queue:  NewDownloadQueue(),
+		downloadHTTP: &http.Client{
+			Timeout: 0, // no timeout for large file transfers
+			Transport: &http.Transport{
+				MaxIdleConns:        10,
+				IdleConnTimeout:     90 * time.Second,
+				TLSHandshakeTimeout: 10 * time.Second,
+				ForceAttemptHTTP2:   false, // use HTTP/1.1 to avoid stream resets
+			},
+		},
+	}
 
 	return client
 }
@@ -116,4 +130,93 @@ func (c *Client) GetAuthHeader() string {
 // GetTokenHeader returns the X-Emby-Token header value
 func (c *Client) GetTokenHeader() string {
 	return c.config.AccessToken
+}
+
+// doRequest creates and executes an authenticated HTTP request, returning the response body.
+// It sets the full MediaBrowser authorization header and Content-Type.
+// The caller is responsible for providing the correct method, URL, and optional body.
+func (c *Client) doRequest(method, url string, body io.Reader) ([]byte, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"MediaBrowser Client=\"%s\", Device=\"%s\", DeviceId=\"%s\", Version=\"%s\", Token=\"%s\"",
+		c.config.ClientName,
+		c.config.ClientName,
+		c.config.DeviceID,
+		c.config.Version,
+		c.config.AccessToken,
+	))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return respBody, nil
+}
+
+// doRequestDecode creates and executes an authenticated HTTP request, decoding the JSON response into dest.
+func (c *Client) doRequestDecode(method, url string, body io.Reader, dest interface{}) error {
+	respBody, err := c.doRequest(method, url, body)
+	if err != nil {
+		return err
+	}
+
+	if err := json.Unmarshal(respBody, dest); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return nil
+}
+
+// doTokenRequest creates and executes an HTTP request with the simple Token authorization header.
+// Used by libraries and auth endpoints that use the shorter auth format.
+func (c *Client) doTokenRequest(method, url string) ([]byte, error) {
+	req, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("MediaBrowser Token=\"%s\"", c.config.AccessToken))
+	req.Header.Set("User-Agent", fmt.Sprintf("%s/%s", c.config.ClientName, c.config.Version))
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	return body, nil
+}
+
+// toItems converts a slice of concrete item types to a slice of the Item interface.
+func toItems[T Item](items []T) []Item {
+	result := make([]Item, len(items))
+	for i, item := range items {
+		result[i] = item
+	}
+	return result
 }

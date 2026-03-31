@@ -76,7 +76,7 @@ func (b *ClientBuilder) BuildAndConnect() (*Client, error) {
 
 	// Test connection first
 	if err := client.Auth.TestConnection(); err != nil {
-		return nil, fmt.Errorf("failed to connect to server: %v", err)
+		return nil, fmt.Errorf("failed to connect to server: %w", err)
 	}
 
 	// If not authenticated, try to load session or authenticate
@@ -91,7 +91,7 @@ func (b *ClientBuilder) BuildAndConnect() (*Client, error) {
 
 		// Authenticate using Quick Connect
 		if err := client.Auth.AuthenticateWithQuickConnect(); err != nil {
-			return nil, fmt.Errorf("authentication failed: %v", err)
+			return nil, fmt.Errorf("authentication failed: %w", err)
 		}
 
 		// Save session

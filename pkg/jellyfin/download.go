@@ -1,6 +1,7 @@
 package jellyfin
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,14 +9,24 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adrg/xdg"
 )
 
+// Pre-compiled regexes to avoid recompilation in hot paths
+var (
+	invalidFSCharsRe = regexp.MustCompile(`[<>:"/\\|?*]`)
+	yearInParensRe   = regexp.MustCompile(`\((\d{4})\)`)
+	nonAlphanumRe    = regexp.MustCompile(`[^a-zA-Z0-9]+`)
+)
+
 // DownloadAPI handles video download operations
 type DownloadAPI struct {
-	client *Client
+	client       *Client
+	Queue        *DownloadQueue
+	downloadHTTP *http.Client // dedicated client with no timeout for large file transfers
 }
 
 // DownloadInfo contains information about a download
@@ -41,6 +52,292 @@ const (
 	DownloadCancelled
 )
 
+func (s DownloadStatus) String() string {
+	switch s {
+	case DownloadPending:
+		return "pending"
+	case DownloadInProgress:
+		return "downloading"
+	case DownloadCompleted:
+		return "completed"
+	case DownloadFailed:
+		return "failed"
+	case DownloadCancelled:
+		return "cancelled"
+	default:
+		return "unknown"
+	}
+}
+
+// QueueItem represents a single item in the download queue
+type QueueItem struct {
+	ID         string
+	Name       string
+	FilePath   string
+	Status     DownloadStatus
+	Progress   float64 // 0-100
+	Downloaded int64
+	Total      int64
+	Error      error
+}
+
+// QueueStatus holds a snapshot of the download queue state
+type QueueStatus struct {
+	Items       []QueueItem
+	Active      int
+	Pending     int
+	Completed   int
+	Failed      int
+	Total       int
+	CurrentName string
+	CurrentPct  float64
+	LastError   string // error message from most recent failure
+}
+
+// DownloadQueue manages a sequential download queue with progress callbacks
+type DownloadQueue struct {
+	mu           sync.Mutex
+	items        []*QueueItem
+	active       *QueueItem
+	done         chan struct{}
+	started      bool
+	lastNotified time.Time
+	OnUpdate     func(QueueStatus) // callback when queue state changes
+}
+
+// NewDownloadQueue creates a new download queue
+func NewDownloadQueue() *DownloadQueue {
+	return &DownloadQueue{
+		done: make(chan struct{}),
+	}
+}
+
+// Enqueue adds an item to the download queue. Returns false if already queued.
+func (q *DownloadQueue) Enqueue(id, name, filePath string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for _, item := range q.items {
+		if item.ID == id && item.Status != DownloadCancelled {
+			return false
+		}
+	}
+
+	q.items = append(q.items, &QueueItem{
+		ID:       id,
+		Name:     name,
+		FilePath: filePath,
+		Status:   DownloadPending,
+	})
+
+	return true
+}
+
+// CancelItem marks a pending item as cancelled
+func (q *DownloadQueue) CancelItem(id string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for _, item := range q.items {
+		if item.ID == id {
+			if item.Status == DownloadPending {
+				item.Status = DownloadCancelled
+				return true
+			}
+			return false
+		}
+	}
+	return false
+}
+
+// RemoveCompleted removes all completed and failed items from the queue
+func (q *DownloadQueue) RemoveCompleted() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	kept := make([]*QueueItem, 0, len(q.items))
+	for _, item := range q.items {
+		if item.Status != DownloadCompleted && item.Status != DownloadFailed && item.Status != DownloadCancelled {
+			kept = append(kept, item)
+		}
+	}
+	q.items = kept
+}
+
+// Status returns a snapshot of the current queue state
+func (q *DownloadQueue) Status() QueueStatus {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	status := QueueStatus{
+		Total: len(q.items),
+	}
+
+	status.Items = make([]QueueItem, len(q.items))
+	for i, item := range q.items {
+		status.Items[i] = *item
+		switch item.Status {
+		case DownloadPending:
+			status.Pending++
+		case DownloadInProgress:
+			status.Active++
+		case DownloadCompleted:
+			status.Completed++
+		case DownloadFailed:
+			status.Failed++
+			if item.Error != nil {
+				status.LastError = item.Error.Error()
+			}
+		}
+	}
+
+	if q.active != nil {
+		status.CurrentName = q.active.Name
+		status.CurrentPct = q.active.Progress
+	}
+
+	return status
+}
+
+// IsActive returns true if the queue has items being processed
+func (q *DownloadQueue) IsActive() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.started && q.active != nil
+}
+
+// HasPending returns true if there are pending items in the queue
+func (q *DownloadQueue) HasPending() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, item := range q.items {
+		if item.Status == DownloadPending {
+			return true
+		}
+	}
+	return false
+}
+
+// nextPending returns the next pending item, or nil
+func (q *DownloadQueue) nextPending() *QueueItem {
+	for _, item := range q.items {
+		if item.Status == DownloadPending {
+			return item
+		}
+	}
+	return nil
+}
+
+// notify calls the OnUpdate callback if set, throttled to once per second
+func (q *DownloadQueue) notify() {
+	if q.OnUpdate == nil {
+		return
+	}
+	now := time.Now()
+	if now.Sub(q.lastNotified) < time.Second {
+		return
+	}
+	q.lastNotified = now
+	q.OnUpdate(q.Status())
+}
+
+// notifyImmediate calls the OnUpdate callback without throttling (for status changes)
+func (q *DownloadQueue) notifyImmediate() {
+	if q.OnUpdate != nil {
+		q.lastNotified = time.Now()
+		q.OnUpdate(q.Status())
+	}
+}
+
+// Start kicks off the worker goroutine that processes the queue
+func (q *DownloadQueue) Start(api *DownloadAPI) {
+	q.mu.Lock()
+	if q.started {
+		q.mu.Unlock()
+		return
+	}
+	q.started = true
+	q.mu.Unlock()
+
+	go q.worker(api)
+}
+
+// worker processes the download queue sequentially
+func (q *DownloadQueue) worker(api *DownloadAPI) {
+	for {
+		q.mu.Lock()
+		item := q.nextPending()
+		if item == nil {
+			q.started = false
+			q.mu.Unlock()
+			return
+		}
+		item.Status = DownloadInProgress
+		q.active = item
+		q.mu.Unlock()
+		q.notifyImmediate()
+
+		// Get full item details to build proper directory structure
+		detail, err := api.client.Items.GetDetails(item.ID)
+		if err != nil {
+			q.mu.Lock()
+			item.Status = DownloadFailed
+			item.Error = fmt.Errorf("failed to get item details: %w", err)
+			q.active = nil
+			q.mu.Unlock()
+			q.notifyImmediate()
+			continue
+		}
+
+		// Build proper path from full details
+		filePath, err := api.BuildVideoPath(detail)
+		if err != nil {
+			q.mu.Lock()
+			item.Status = DownloadFailed
+			item.Error = fmt.Errorf("failed to build path: %w", err)
+			q.active = nil
+			q.mu.Unlock()
+			q.notifyImmediate()
+			continue
+		}
+		item.FilePath = filePath
+
+		err = api.DownloadVideo(detail, func(downloaded, total int64) {
+			q.mu.Lock()
+			item.Downloaded = downloaded
+			item.Total = total
+			if total > 0 {
+				item.Progress = float64(downloaded) / float64(total) * 100
+			}
+			q.mu.Unlock()
+			q.notify() // throttled - won't spam the UI
+		})
+
+		q.mu.Lock()
+		if item.Status == DownloadCancelled {
+			q.active = nil
+			q.mu.Unlock()
+			q.notifyImmediate()
+			continue
+		}
+		if err != nil {
+			if strings.Contains(err.Error(), "already downloaded") {
+				item.Status = DownloadCompleted
+				item.Progress = 100
+			} else {
+				item.Status = DownloadFailed
+				item.Error = err
+			}
+		} else {
+			item.Status = DownloadCompleted
+			item.Progress = 100
+		}
+		q.active = nil
+		q.mu.Unlock()
+		q.notifyImmediate()
+	}
+}
+
 // GetDownloadsDir returns the downloads directory path in jtui config
 func (d *DownloadAPI) GetDownloadsDir() (string, error) {
 	configHome := xdg.ConfigHome
@@ -63,10 +360,7 @@ func (d *DownloadAPI) BuildVideoPath(item *DetailedItem) (string, error) {
 
 	// Sanitize names for filesystem
 	sanitize := func(name string) string {
-		// Replace invalid filesystem characters
-		re := regexp.MustCompile(`[<>:"/\\|?*]`)
-		sanitized := re.ReplaceAllString(name, "_")
-		// Limit length to 100 characters to avoid filesystem limits
+		sanitized := invalidFSCharsRe.ReplaceAllString(name, "_")
 		if len(sanitized) > 100 {
 			sanitized = sanitized[:100]
 		}
@@ -172,8 +466,8 @@ func (d *DownloadAPI) DownloadVideo(item *DetailedItem, progressCallback func(do
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Make request
-	resp, err := d.client.http.Do(req)
+	// Make request using dedicated download client (no timeout)
+	resp, err := d.downloadHTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download video: %w", err)
 	}
@@ -231,7 +525,145 @@ func (d *DownloadAPI) DownloadVideo(item *DetailedItem, progressCallback func(do
 		return fmt.Errorf("failed to rename file: %w", err)
 	}
 
+	// Save metadata sidecar for offline browsing
+	d.saveMetadataSidecar(filePath, item)
+
 	return nil
+}
+
+// metadataSidecarPath returns the JSON sidecar path for a given video file path
+func metadataSidecarPath(videoPath string) string {
+	return videoPath + ".json"
+}
+
+// saveMetadataSidecar writes DetailedItem metadata as JSON next to the video file
+func (d *DownloadAPI) saveMetadataSidecar(videoPath string, item *DetailedItem) error {
+	data, err := json.Marshal(item)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	sidecar := metadataSidecarPath(videoPath)
+	return os.WriteFile(sidecar, data, 0o644)
+}
+
+// loadMetadataSidecar reads DetailedItem metadata from a JSON sidecar file.
+// Returns nil if the sidecar doesn't exist or can't be parsed.
+func (d *DownloadAPI) loadMetadataSidecar(videoPath string) *DetailedItem {
+	data, err := os.ReadFile(metadataSidecarPath(videoPath))
+	if err != nil {
+		return nil
+	}
+
+	var item DetailedItem
+	if err := json.Unmarshal(data, &item); err != nil {
+		return nil
+	}
+
+	return &item
+}
+
+// EnqueueItem adds a single video to the download queue and starts the worker if needed
+func (d *DownloadAPI) EnqueueItem(item *DetailedItem) error {
+	filePath, err := d.BuildVideoPath(item)
+	if err != nil {
+		return fmt.Errorf("failed to build file path: %w", err)
+	}
+
+	// Skip if already downloaded
+	if downloaded, _, _ := d.IsDownloaded(item); downloaded {
+		return nil
+	}
+
+	if !d.Queue.Enqueue(item.GetID(), item.GetName(), filePath) {
+		return fmt.Errorf("item already in queue")
+	}
+
+	d.Queue.Start(d)
+	return nil
+}
+
+// EnqueueShow adds all episodes of a show to the download queue
+func (d *DownloadAPI) EnqueueShow(seriesID string, seriesName string) (int, error) {
+	episodes, err := d.client.Items.GetAllEpisodes(seriesID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get episodes for show: %w", err)
+	}
+
+	if len(episodes) == 0 {
+		return 0, nil
+	}
+
+	enqueued := 0
+	for i := range episodes {
+		ep := &episodes[i]
+		filePath, err := d.BuildVideoPath(ep)
+		if err != nil {
+			continue
+		}
+
+		// Skip already downloaded
+		if downloaded, _, _ := d.IsDownloaded(ep); downloaded {
+			continue
+		}
+
+		displayName := ep.GetName()
+		if ep.GetSeasonNumber() > 0 && ep.GetEpisodeNumber() > 0 {
+			displayName = fmt.Sprintf("%s - S%02dE%02d - %s",
+				seriesName, ep.GetSeasonNumber(), ep.GetEpisodeNumber(), ep.GetName())
+		}
+
+		if d.Queue.Enqueue(ep.GetID(), displayName, filePath) {
+			enqueued++
+		}
+	}
+
+	if enqueued > 0 {
+		d.Queue.Start(d)
+	}
+
+	return enqueued, nil
+}
+
+// EnqueueSeason adds all episodes of a specific season to the download queue
+func (d *DownloadAPI) EnqueueSeason(seriesID, seasonID, seriesName string) (int, error) {
+	episodes, err := d.client.Items.GetEpisodes(seriesID, seasonID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get episodes for season: %w", err)
+	}
+
+	if len(episodes) == 0 {
+		return 0, nil
+	}
+
+	enqueued := 0
+	for i := range episodes {
+		ep := &episodes[i]
+		filePath, err := d.BuildVideoPath(ep)
+		if err != nil {
+			continue
+		}
+
+		if downloaded, _, _ := d.IsDownloaded(ep); downloaded {
+			continue
+		}
+
+		displayName := ep.GetName()
+		if ep.GetSeasonNumber() > 0 && ep.GetEpisodeNumber() > 0 {
+			displayName = fmt.Sprintf("%s - S%02dE%02d - %s",
+				seriesName, ep.GetSeasonNumber(), ep.GetEpisodeNumber(), ep.GetName())
+		}
+
+		if d.Queue.Enqueue(ep.GetID(), displayName, filePath) {
+			enqueued++
+		}
+	}
+
+	if enqueued > 0 {
+		d.Queue.Start(d)
+	}
+
+	return enqueued, nil
 }
 
 // GetLocalVideoPath returns the local file path if video is downloaded
@@ -242,7 +674,7 @@ func (d *DownloadAPI) GetLocalVideoPath(item *DetailedItem) (string, bool) {
 	return "", false
 }
 
-// RemoveDownload removes a downloaded video file
+// RemoveDownload removes a downloaded video file and its metadata sidecar
 func (d *DownloadAPI) RemoveDownload(item *DetailedItem) error {
 	filePath, err := d.BuildVideoPath(item)
 	if err != nil {
@@ -255,6 +687,9 @@ func (d *DownloadAPI) RemoveDownload(item *DetailedItem) error {
 		}
 		return fmt.Errorf("failed to remove video file: %w", err)
 	}
+
+	// Remove metadata sidecar if it exists
+	os.Remove(metadataSidecarPath(filePath))
 
 	// Try to remove empty parent directories
 	parentDir := filepath.Dir(filePath)
@@ -328,6 +763,7 @@ type OfflineContent struct {
 	Year          int    // For movies
 	Size          int64
 	ModTime       time.Time
+	Metadata      *DetailedItem // Loaded from sidecar if available
 }
 
 // DiscoverOfflineContent scans the downloads directory and creates virtual content items
@@ -357,6 +793,10 @@ func (d *DownloadAPI) DiscoverOfflineContent() ([]Item, error) {
 		}
 
 		content := d.parseOfflineContent(path, relPath, info)
+
+		// Try to load richer metadata from sidecar
+		content.Metadata = d.loadMetadataSidecar(path)
+
 		offlineContent = append(offlineContent, content)
 
 		return nil
@@ -414,12 +854,10 @@ func (d *DownloadAPI) parseOfflineContent(fullPath, relativePath string, info os
 
 		// Parse year from movie name
 		if strings.Contains(content.Name, "(") && strings.Contains(content.Name, ")") {
-			re := regexp.MustCompile(`\((\d{4})\)`)
-			matches := re.FindStringSubmatch(content.Name)
+			matches := yearInParensRe.FindStringSubmatch(content.Name)
 			if len(matches) > 1 {
 				fmt.Sscanf(matches[1], "%d", &content.Year)
-				// Remove year from name
-				content.Name = strings.TrimSpace(re.ReplaceAllString(content.Name, ""))
+				content.Name = strings.TrimSpace(yearInParensRe.ReplaceAllString(content.Name, ""))
 			}
 		}
 
@@ -453,32 +891,50 @@ func (d *DownloadAPI) convertToItems(offlineContent []OfflineContent) []Item {
 
 	// Add series as folders (only if they have episodes)
 	for seriesName, episodes := range seriesMap {
-		if len(episodes) > 0 { // Only add series that have actual video files
-			seriesItem := &DetailedItem{
-				SimpleItem: SimpleItem{
-					Name:     seriesName,
-					ID:       fmt.Sprintf("offline-series-%s", sanitizeID(seriesName)),
-					IsFolder: true,
-					Type:     "Series",
-				},
-			}
-			items = append(items, seriesItem)
+		if len(episodes) == 0 {
+			continue
 		}
+
+		// Try to get series-level info from first episode's metadata
+		seriesItem := &DetailedItem{
+			SimpleItem: SimpleItem{
+				Name:     seriesName,
+				ID:       fmt.Sprintf("offline-series-%s", sanitizeID(seriesName)),
+				IsFolder: true,
+				Type:     "Series",
+			},
+		}
+
+		// Use metadata from first episode for series name accuracy
+		if episodes[0].Metadata != nil {
+			seriesItem.Name = episodes[0].Metadata.SeriesName
+			seriesItem.SimpleItem.Name = episodes[0].Metadata.SeriesName
+		}
+
+		items = append(items, seriesItem)
 	}
 
-	// Add movies directly
+	// Add movies directly — prefer sidecar metadata
 	for _, movie := range movies {
-		movieItem := &DetailedItem{
-			SimpleItem: SimpleItem{
-				Name:     movie.Name,
-				ID:       fmt.Sprintf("offline-movie-%s", sanitizeID(movie.Name)),
-				IsFolder: false,
-				Type:     "Movie",
-			},
-			ProductionYear: movie.Year,
-			RunTimeTicks:   0, // Unknown for offline content
+		if movie.Metadata != nil {
+			// Full metadata from sidecar
+			meta := movie.Metadata
+			meta.SimpleItem.ID = fmt.Sprintf("offline-movie-%s", sanitizeID(movie.Name))
+			meta.SimpleItem.IsFolder = false
+			items = append(items, meta)
+		} else {
+			// Fallback: reconstructed from path
+			movieItem := &DetailedItem{
+				SimpleItem: SimpleItem{
+					Name:     movie.Name,
+					ID:       fmt.Sprintf("offline-movie-%s", sanitizeID(movie.Name)),
+					IsFolder: false,
+					Type:     "Movie",
+				},
+				ProductionYear: movie.Year,
+			}
+			items = append(items, movieItem)
 		}
-		items = append(items, movieItem)
 	}
 
 	// Add other content
@@ -523,17 +979,27 @@ func (d *DownloadAPI) GetOfflineEpisodes(seriesName string) ([]Item, error) {
 
 		content := d.parseOfflineContent(path, relPath, info)
 		if content.Type == "Episode" && content.SeriesName == seriesName {
-			episodeItem := &DetailedItem{
-				SimpleItem: SimpleItem{
-					Name:     content.Name,
-					ID:       fmt.Sprintf("offline-episode-%s", sanitizeID(content.FilePath)),
-					IsFolder: false,
-					Type:     "Episode",
-				},
-				SeriesName:        content.SeriesName,
-				ParentIndexNumber: content.SeasonNumber,
-				IndexNumber:       content.EpisodeNumber,
+			var episodeItem *DetailedItem
+
+			// Prefer full metadata from sidecar
+			if meta := d.loadMetadataSidecar(path); meta != nil {
+				meta.SimpleItem.ID = fmt.Sprintf("offline-episode-%s", sanitizeID(content.FilePath))
+				meta.SimpleItem.IsFolder = false
+				episodeItem = meta
+			} else {
+				episodeItem = &DetailedItem{
+					SimpleItem: SimpleItem{
+						Name:     content.Name,
+						ID:       fmt.Sprintf("offline-episode-%s", sanitizeID(content.FilePath)),
+						IsFolder: false,
+						Type:     "Episode",
+					},
+					SeriesName:        content.SeriesName,
+					ParentIndexNumber: content.SeasonNumber,
+					IndexNumber:       content.EpisodeNumber,
+				}
 			}
+
 			episodes = append(episodes, episodeItem)
 		}
 
@@ -548,9 +1014,7 @@ func (d *DownloadAPI) GetOfflineEpisodes(seriesName string) ([]Item, error) {
 
 // sanitizeID creates a safe ID from a string
 func sanitizeID(input string) string {
-	// Replace spaces and special characters with hyphens
-	re := regexp.MustCompile(`[^a-zA-Z0-9]+`)
-	sanitized := re.ReplaceAllString(input, "-")
+	sanitized := nonAlphanumRe.ReplaceAllString(input, "-")
 	return strings.Trim(sanitized, "-")
 }
 
@@ -591,6 +1055,8 @@ func (d *DownloadAPI) GetOfflineItemByID(itemID string) (*DetailedItem, string, 
 		}
 
 		if expectedID == itemID {
+			// Try to load sidecar metadata for richer results
+			content.Metadata = d.loadMetadataSidecar(path)
 			foundContent = &content
 			foundPath = path
 		}
@@ -605,7 +1071,15 @@ func (d *DownloadAPI) GetOfflineItemByID(itemID string) (*DetailedItem, string, 
 		return nil, "", fmt.Errorf("offline item not found")
 	}
 
-	// Convert to DetailedItem
+	// Prefer full sidecar metadata if available
+	if foundContent.Metadata != nil {
+		item := foundContent.Metadata
+		item.SimpleItem.ID = itemID
+		item.SimpleItem.IsFolder = false
+		return item, foundPath, nil
+	}
+
+	// Fallback: reconstruct from path
 	item := &DetailedItem{
 		SimpleItem: SimpleItem{
 			Name:     foundContent.Name,
