@@ -20,8 +20,8 @@ var queryCmd = &cobra.Command{
 	Long: `
 Browse your Jellyfin media library using an interactive TUI.
 
-Navigate through libraries, folders, and media files.
-Use arrow keys or hjkl to navigate, Enter to open, Space/p to play.`,
+Navigate with arrow keys or hjkl. Enter to open, Space to play/pause.
+Press / to search, d to download, w to toggle watched, q to quit.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Create and authenticate client
 		client, err := jellyfin.ConnectFromConfig(func(key string) string {

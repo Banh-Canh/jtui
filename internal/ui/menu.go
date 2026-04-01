@@ -34,6 +34,25 @@ const (
 	SearchView
 )
 
+type FilterType int
+
+const (
+	FilterAll FilterType = iota
+	FilterDownloaded
+	FilterUnwatched
+)
+
+func (f FilterType) String() string {
+	switch f {
+	case FilterDownloaded:
+		return "Downloaded"
+	case FilterUnwatched:
+		return "Unwatched"
+	default:
+		return ""
+	}
+}
+
 // Path constants to avoid hardcoded strings scattered throughout the code
 const (
 	mpvSocketPath     = "/tmp/jtui-mpvsocket"
@@ -58,6 +77,7 @@ type model struct {
 	client         *jellyfin.Client
 	currentView    ViewType
 	items          []jellyfin.Item
+	allItems       []jellyfin.Item // unfiltered items from server
 	cursor         int
 	currentPath    []pathItem
 	currentDetails *jellyfin.DetailedItem
@@ -84,6 +104,11 @@ type model struct {
 	cachedDownloadDirty bool // true when details changed and cache needs refresh
 	// Download queue status
 	dlQueueStatus jellyfin.QueueStatus
+	// Item filter
+	filter              FilterType
+	downloadedIDCache   map[string]bool // item IDs known to be downloaded (sidecar + video exists)
+	downloadedParentIDs map[string]bool // folder IDs/names that contain downloaded items
+	downloadedFilenames map[string]bool // base filenames of downloaded .mkv files (lowercased)
 }
 
 // Messages
@@ -303,6 +328,9 @@ func loadLibraries(client *jellyfin.Client) tea.Cmd {
 
 func loadItems(client *jellyfin.Client, parentID string, includeFolders bool) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		items, err := client.Items.Get(parentID, includeFolders)
 		if err != nil {
 			return errMsg{err}
@@ -313,6 +341,9 @@ func loadItems(client *jellyfin.Client, parentID string, includeFolders bool) te
 
 func loadItemDetails(client *jellyfin.Client, itemID string) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		details, err := client.Items.GetDetails(itemID)
 		if err != nil {
 			return errMsg{err}
@@ -323,6 +354,9 @@ func loadItemDetails(client *jellyfin.Client, itemID string) tea.Cmd {
 
 func searchItems(client *jellyfin.Client, query string) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		items, err := client.Search.Quick(query)
 		if err != nil {
 			return errMsg{err}
@@ -333,6 +367,9 @@ func searchItems(client *jellyfin.Client, query string) tea.Cmd {
 
 func loadContinueWatching(client *jellyfin.Client) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		items, err := client.Items.GetResumeItems()
 		if err != nil {
 			return errMsg{err}
@@ -343,6 +380,9 @@ func loadContinueWatching(client *jellyfin.Client) tea.Cmd {
 
 func loadNextUp(client *jellyfin.Client) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		items, err := client.Items.GetNextUp()
 		if err != nil {
 			return errMsg{err}
@@ -353,6 +393,9 @@ func loadNextUp(client *jellyfin.Client) tea.Cmd {
 
 func loadRecentlyAddedMovies(client *jellyfin.Client) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		items, err := client.Items.GetRecentlyAddedMovies()
 		if err != nil {
 			return errMsg{err}
@@ -363,6 +406,9 @@ func loadRecentlyAddedMovies(client *jellyfin.Client) tea.Cmd {
 
 func loadRecentlyAddedShows(client *jellyfin.Client) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		items, err := client.Items.GetRecentlyAddedShows()
 		if err != nil {
 			return errMsg{err}
@@ -373,6 +419,9 @@ func loadRecentlyAddedShows(client *jellyfin.Client) tea.Cmd {
 
 func loadRecentlyAddedEpisodes(client *jellyfin.Client) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		items, err := client.Items.GetRecentlyAddedEpisodes()
 		if err != nil {
 			return errMsg{err}
@@ -383,6 +432,9 @@ func loadRecentlyAddedEpisodes(client *jellyfin.Client) tea.Cmd {
 
 func loadDownloadedContent(client *jellyfin.Client) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		items, err := client.Download.DiscoverOfflineContent()
 		if err != nil {
 			return errMsg{err}
@@ -393,6 +445,9 @@ func loadDownloadedContent(client *jellyfin.Client) tea.Cmd {
 
 func toggleWatchedStatus(client *jellyfin.Client, itemID string, currentDetails *jellyfin.DetailedItem) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return errMsg{fmt.Errorf("client is nil")}
+		}
 		if currentDetails == nil {
 			return errMsg{fmt.Errorf("no item details available")}
 		}
@@ -424,8 +479,7 @@ func isVirtualFolder(itemID string) bool {
 		itemID == "virtual-next-up" ||
 		itemID == "virtual-recently-added-movies" ||
 		itemID == "virtual-recently-added-shows" ||
-		itemID == "virtual-recently-added-episodes" ||
-		itemID == "virtual-downloaded"
+		itemID == "virtual-recently-added-episodes"
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -441,10 +495,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Clear success message on any key press
 	if m.successMsg != "" {
-		switch msg.(type) {
+		switch msg := msg.(type) {
 		case tea.KeyMsg:
-			m.successMsg = ""
-			// Continue processing the key
+			keyStr := msg.String()
+			// Allow escape and q to be handled normally even with success message
+			if keyStr == "escape" || keyStr == "q" || keyStr == "ctrl+c" {
+				m.successMsg = ""
+				// Fall through to normal key handling below
+			} else {
+				m.successMsg = ""
+				// Continue processing the key
+			}
+		case downloadQueueUpdateMsg:
+			// Don't clear success msg on queue updates
+			return m, nil
 		}
 	}
 
@@ -456,6 +520,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case librariesLoadedMsg:
 		m.loading = false
+		// Clamp cursor if items were removed during async operation
+		m.clampCursor()
 		// Add virtual directories at the top
 		virtualItems := []jellyfin.Item{
 			&jellyfin.SimpleItem{
@@ -488,15 +554,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				IsFolder: true,
 				Type:     "VirtualFolder",
 			},
-			&jellyfin.SimpleItem{
-				Name:     "Downloaded",
-				ID:       "virtual-downloaded",
-				IsFolder: true,
-				Type:     "VirtualFolder",
-			},
 		}
 		// Combine virtual directories with real libraries
-		m.items = append(virtualItems, msg.items...)
+		m.allItems = append(virtualItems, msg.items...)
+		m.items = m.allItems
 		m.cursor = 0
 		m.viewportOffset = 0
 		m.updateViewport()
@@ -514,7 +575,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case foldersLoadedMsg:
 		m.loading = false
-		m.items = msg.items
+		m.allItems = msg.items
+		m.applyFilter()
 		m.cursor = 0
 		m.viewportOffset = 0
 		m.updateViewport()
@@ -525,7 +587,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case itemsLoadedMsg:
 		m.loading = false
-		m.items = msg.items
+		m.allItems = msg.items
+		m.applyFilter()
 		m.cursor = 0
 		m.viewportOffset = 0
 		m.updateViewport()
@@ -578,10 +641,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case searchResultsMsg:
 		m.loading = false
-		m.items = msg.items
+		m.allItems = msg.items
+		m.items = m.allItems // Don't filter search results
 		m.cursor = 0
 		m.viewportOffset = 0
 		m.currentView = LibraryView // Reset to normal browsing mode
+		m.clampCursor()
 		m.updateViewport()
 		if len(m.items) > 0 {
 			return m, loadItemDetails(m.client, m.items[0].GetID())
@@ -606,12 +671,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case downloadQueueUpdateMsg:
 		m.dlQueueStatus = msg.status
-		// Surface download failures as error messages
+		// Surface download failures as non-fatal notification (don't block UI)
 		if msg.status.Failed > 0 && msg.status.LastError != "" {
-			m.err = nil // don't set fatal error
+			m.err = nil // don't set fatal error - user can still navigate
 			m.successMsg = ""
-			// Show the error inline
-			m.successMsg = fmt.Sprintf("Download failed: %s", msg.status.LastError)
 		}
 		return m, nil
 
@@ -747,10 +810,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				// Allow quit even in search mode
 				return m, tea.Quit
+			case "ctrl+u":
+				// Clear entire search query
+				m.searchQuery = ""
+			case "ctrl+w":
+				// Delete last word
+				m.searchQuery = trimLastWord(m.searchQuery)
 			default:
-				// Allow any single character for free typing
-				if len(msg.String()) == 1 {
-					m.searchQuery += msg.String()
+				// Ignore navigation keys that would be confusing in search mode
+				switch msg.String() {
+				case "up", "down", "left", "right", "k", "j", "h", "l":
+					// Ignore navigation in search mode
+				case "g", "G", "pageup", "pagedown":
+					// Ignore page navigation in search mode
+				default:
+					// Allow any single character for free typing (including space)
+					if len(msg.String()) == 1 {
+						m.searchQuery += msg.String()
+					}
 				}
 			}
 			return m, nil
@@ -836,7 +913,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, loadItemDetails(m.client, itemID)
 				}
 			}
-		case "pageup", "left":
+		case "pageup":
 			// Page up
 			if len(m.items) > 0 {
 				m.updateViewport()
@@ -856,7 +933,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, loadItemDetails(m.client, itemID)
 				}
 			}
-		case "pagedown", "right":
+		case "pagedown":
 			// Page down
 			if len(m.items) > 0 {
 				m.updateViewport()
@@ -882,11 +959,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "backspace", "h":
 			return m.goBack()
-		case "p", " ":
-			// If video is playing, toggle pause/play; otherwise play from beginning
+		case " ":
+			// Space: play/pause toggle
 			if m.isVideoPlaying {
 				return m, togglePause()
-			} else if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() {
+			} else if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil {
+				// Not playing - start from beginning
 				m.currentPlayingItem = m.currentDetails
 				return m, tea.Batch(
 					playItem(m.client, m.items[m.cursor].GetID(), 0),
@@ -894,8 +972,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				)
 			}
 		case "r":
-			// Resume item from saved position
-			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil && m.currentDetails.HasResumePosition() {
+			// Resume from saved position (explicit)
+			if m.isVideoPlaying {
+				return m, togglePause()
+			} else if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil && m.currentDetails.HasResumePosition() {
 				resumePosition := m.currentDetails.GetPlaybackPositionTicks()
 				m.currentPlayingItem = m.currentDetails
 				return m, tea.Batch(
@@ -905,7 +985,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "w":
 			// Toggle watched status
-			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() {
+			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil {
 				return m, toggleWatchedStatus(m.client, m.items[m.cursor].GetID(), m.currentDetails)
 			}
 		case "/":
@@ -914,43 +994,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchQuery = ""
 			return m, nil
 		case "d":
-			// Download: single item, season, or show
+			// Smart download/remove: download if not downloaded, remove if downloaded
 			if len(m.items) > 0 && m.currentDetails != nil {
 				item := m.items[m.cursor]
 				if item.GetIsFolder() {
 					details := m.currentDetails
 					switch details.Type {
 					case "Season":
-						// Download all episodes of this season
 						seriesID := m.parentSeriesID()
 						return m, downloadSeason(m.client, seriesID, item.GetID(), details.GetName())
 					case "Series":
-						// Download entire show (all seasons)
 						return m, downloadShow(m.client, item.GetID(), details.GetName())
 					}
 				} else {
-					// Single item download
+					// Check if already downloaded - if so, remove it
+					if downloaded, _, err := m.client.Download.IsDownloaded(m.currentDetails); err == nil && downloaded {
+						return m, removeDownload(m.client, m.currentDetails)
+					}
 					return m, downloadVideo(m.client, m.currentDetails)
 				}
 			}
-		case "D":
-			// Download entire show from anywhere (episode, season, or show view)
-			seriesID, seriesName := m.findSeriesContext()
-			if seriesID != "" {
-				return m, downloadShow(m.client, seriesID, seriesName)
+		case "f":
+			// Cycle item filter: All → Downloaded → Unwatched → All
+			m.filter = (m.filter + 1) % 3
+			// Build download ID cache when switching to Downloaded filter
+			if m.filter == FilterDownloaded && m.downloadedIDCache == nil {
+				m.buildDownloadedIDCache()
 			}
-		case "x":
-			// Remove downloaded video
-			if len(m.items) > 0 && !m.items[m.cursor].GetIsFolder() && m.currentDetails != nil {
-				return m, removeDownload(m.client, m.currentDetails)
+			if m.filter == FilterAll {
+				m.downloadedIDCache = nil
+				m.downloadedParentIDs = nil
+				m.downloadedFilenames = nil
 			}
+			m.applyFilter()
+			// Load details for newly selected item
+			if len(m.items) > 0 && m.cursor < len(m.items) {
+				itemID := m.items[m.cursor].GetID()
+				if !isVirtualFolder(itemID) {
+					return m, loadItemDetails(m.client, itemID)
+				}
+			}
+			return m, nil
 		case "s":
 			// Stop video playback
 			if m.isVideoPlaying {
 				return m, stopPlayback()
 			}
 		case "u":
-			// Cycle subtitle tracks (u for sUbtitles)
+			// Cycle subtitle tracks
 			if m.isVideoPlaying {
 				return m, cycleSub()
 			}
@@ -965,7 +1056,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// extractSeasonNumber parses a season number from folder names like "Season 01", "Season 1", "01".
+// Returns -1 if no valid number is found.
+func extractSeasonNumber(name string) int {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if strings.HasPrefix(lower, "season") {
+		numStr := strings.TrimSpace(strings.TrimPrefix(lower, "season"))
+		var num int
+		if _, err := fmt.Sscanf(numStr, "%d", &num); err == nil {
+			return num
+		}
+	}
+	return -1
+}
+
+// trimLastWord removes the last word (space-delimited) from a string.
+func trimLastWord(s string) string {
+	s = strings.TrimRight(s, " ")
+	lastSpace := strings.LastIndex(s, " ")
+	if lastSpace == -1 {
+		return ""
+	}
+	return s[:lastSpace+1]
+}
+
 func (m model) selectItem() (model, tea.Cmd) {
+	if len(m.items) == 0 || m.cursor < 0 || m.cursor >= len(m.items) {
+		return m, nil
+	}
 	item := m.items[m.cursor]
 
 	if item.GetIsFolder() {
@@ -1005,13 +1123,6 @@ func (m model) selectItem() (model, tea.Cmd) {
 			})
 			m.loading = true
 			return m, loadRecentlyAddedEpisodes(m.client)
-		} else if item.GetID() == "virtual-downloaded" {
-			m.currentPath = append(m.currentPath, pathItem{
-				name: item.GetName(),
-				id:   item.GetID(),
-			})
-			m.loading = true
-			return m, loadDownloadedContent(m.client)
 		}
 
 		// Navigate into regular folder/library
@@ -1163,7 +1274,7 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 			}
 
 			// Run mpv and wait for completion
-			cmd.Run()
+			runErr := cmd.Run()
 
 			// Signal progress reporting to stop
 			close(done)
@@ -1177,6 +1288,14 @@ func playItem(client *jellyfin.Client, itemID string, startPositionTicks int64) 
 				}
 			}
 			mpvMu.Unlock()
+
+			// If mpv failed to start or crashed early, notify UI
+			if runErr != nil {
+				if globalProgram != nil {
+					globalProgram.Send(errMsg{fmt.Errorf("mpv playback failed: %w", runErr)})
+				}
+				return
+			}
 
 			// Handle completion for both local and remote content
 			if finalPosition := getMpvFloatProperty("time-pos"); finalPosition > 0 {
@@ -1228,7 +1347,10 @@ func mpvIPCCommand(command []string, bufSize int) (map[string]interface{}, error
 		return nil, err
 	}
 
-	conn.Write(append(jsonData, '\n'))
+	if _, err := conn.Write(append(jsonData, '\n')); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to write to mpv socket: %w", err)
+	}
 
 	buffer := make([]byte, bufSize)
 	n, err := conn.Read(buffer)
@@ -1261,7 +1383,10 @@ func mpvIPCCommandWithDeadline(command []string, bufSize int, deadline time.Dura
 		return nil, err
 	}
 
-	conn.Write(append(jsonData, '\n'))
+	if _, err := conn.Write(append(jsonData, '\n')); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to write to mpv socket: %w", err)
+	}
 
 	buffer := make([]byte, bufSize)
 	n, err := conn.Read(buffer)
@@ -1344,7 +1469,10 @@ func sendMpvCommand(args ...string) error {
 		return err
 	}
 
-	conn.Write(append(jsonData, '\n'))
+	if _, err := conn.Write(append(jsonData, '\n')); err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to write to mpv socket: %w", err)
+	}
 	conn.Close()
 	return nil
 }
@@ -1708,6 +1836,11 @@ func (m model) renderKittyImage(leftWidth, rightWidth, contentHeight int) {
 		return
 	}
 
+	// Guard against invalid terminal dimensions
+	if contentHeight <= 12 || rightWidth <= 10 {
+		return
+	}
+
 	imageURL := m.client.Items.GetImageURL(m.currentDetails.GetID(), "Primary", m.currentDetails.ImageTags.Primary)
 	if imageURL == "" {
 		return
@@ -1902,7 +2035,7 @@ func (m model) goBack() (model, tea.Cmd) {
 		return m, loadRecentlyAddedShows(m.client)
 	case "virtual-recently-added-episodes":
 		return m, loadRecentlyAddedEpisodes(m.client)
-	case "virtual-downloaded":
+	case "offline-library":
 		return m, loadDownloadedContent(m.client)
 	default:
 		return m, loadItems(m.client, parentID, true)
@@ -1922,6 +2055,10 @@ func (m model) parentSeriesID() string {
 // Works when viewing a show, season, or episode.
 func (m model) findSeriesContext() (string, string) {
 	if m.currentDetails == nil {
+		return "", ""
+	}
+
+	if len(m.items) == 0 || m.cursor < 0 || m.cursor >= len(m.items) {
 		return "", ""
 	}
 
@@ -1956,6 +2093,21 @@ func (m model) findSeriesContext() (string, string) {
 	return "", ""
 }
 
+// clampCursor ensures cursor is within valid bounds of the items slice.
+func (m *model) clampCursor() {
+	if len(m.items) == 0 {
+		m.cursor = 0
+		m.viewportOffset = 0
+		return
+	}
+	if m.cursor >= len(m.items) {
+		m.cursor = len(m.items) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
 func (m *model) updateViewport() {
 	// Calculate viewport bounds for item list
 	m.viewport = m.height - 8 // Leave space for title, borders, and help
@@ -1986,9 +2138,191 @@ func (m *model) updateViewportForBottom() {
 	}
 }
 
+// applyFilter filters allItems into items based on the current filter setting.
+func (m *model) applyFilter() {
+	if m.filter == FilterAll {
+		m.items = m.allItems
+	} else {
+		m.items = nil
+		for _, item := range m.allItems {
+			if m.itemMatchesFilter(item) {
+				m.items = append(m.items, item)
+			}
+		}
+	}
+	m.clampCursor()
+	m.updateViewport()
+	if len(m.items) == 0 {
+		m.currentDetails = nil
+	}
+}
+
+// itemMatchesFilter checks if an item matches the current filter.
+func (m model) itemMatchesFilter(item jellyfin.Item) bool {
+	switch m.filter {
+	case FilterDownloaded:
+		if item.GetIsFolder() {
+			// Offline series folders (in Downloaded view) are always shown -
+			// they're containers built from DiscoverOfflineContent
+			if strings.HasPrefix(item.GetID(), "offline-series-") {
+				return true
+			}
+			// Regular folders: check if they contain downloaded items
+			if m.downloadedParentIDs != nil {
+				// Direct ID or name match
+				if m.downloadedParentIDs[item.GetID()] || m.downloadedParentIDs[item.GetName()] {
+					return true
+				}
+				// Season number match: "Season 1" from API vs "Season 01" on disk
+				if num := extractSeasonNumber(item.GetName()); num >= 0 {
+					if m.downloadedParentIDs[fmt.Sprintf("season:%d", num)] {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		// Offline items are always downloaded
+		if strings.HasPrefix(item.GetID(), "offline-") {
+			return true
+		}
+		// Check download status - try DetailedItem first, then IsDownloaded on disk
+		if detailed, ok := item.(jellyfin.DetailedItem); ok {
+			if m.isItemDownloaded(&detailed) {
+				return true
+			}
+		} else if ptrDetailed, ok := item.(*jellyfin.DetailedItem); ok {
+			if m.isItemDownloaded(ptrDetailed) {
+				return true
+			}
+		}
+		return false
+	case FilterUnwatched:
+		if item.GetIsFolder() {
+			return true // always show folders
+		}
+		// Offline items - check metadata if available
+		if detailed, ok := item.(jellyfin.DetailedItem); ok {
+			return !detailed.IsWatched()
+		} else if ptrDetailed, ok := item.(*jellyfin.DetailedItem); ok {
+			return !ptrDetailed.IsWatched()
+		}
+		return true // show items without details (unknown status)
+	default:
+		return true
+	}
+}
+
+// isItemDownloaded checks if a video file exists on disk for the given item.
+// Tries the path-based check first, then falls back to filename and cache lookups.
+func (m model) isItemDownloaded(item *jellyfin.DetailedItem) bool {
+	// Fast path: check if the video file exists at the expected path
+	downloaded, _, err := m.client.Download.IsDownloaded(item)
+	if err == nil && downloaded {
+		return true
+	}
+
+	// Fallback 1: check cached set of downloaded item IDs from sidecar files
+	if m.downloadedIDCache != nil && m.downloadedIDCache[item.GetID()] {
+		return true
+	}
+
+	// Fallback 2: check downloaded filenames for episodes
+	// On disk: "S01E01 - Episode Title.mkv"
+	// BuildVideoPath may have failed if metadata changed, so match by name pattern
+	if m.downloadedFilenames != nil {
+		if item.Type == "Episode" && item.GetSeasonNumber() > 0 && item.GetEpisodeNumber() > 0 {
+			pattern := strings.ToLower(fmt.Sprintf("s%02de%02d", item.GetSeasonNumber(), item.GetEpisodeNumber()))
+			for fn := range m.downloadedFilenames {
+				if strings.Contains(fn, pattern) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// buildDownloadedIDCache scans the downloads directory once and collects:
+// - downloadedIDCache: item IDs from sidecar files where the video also exists
+// - downloadedParentIDs: folder IDs/names that contain downloaded items
+func (m *model) buildDownloadedIDCache() {
+	m.downloadedIDCache = make(map[string]bool)
+	m.downloadedParentIDs = make(map[string]bool)
+	m.downloadedFilenames = make(map[string]bool)
+
+	downloadsDir, err := m.client.Download.GetDownloadsDir()
+	if err != nil {
+		return
+	}
+
+	// First pass: collect item IDs from sidecar files
+	filepath.Walk(downloadsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(path, ".json") {
+			videoPath := strings.TrimSuffix(path, ".json")
+			if _, err := os.Stat(videoPath); err == nil {
+				if data, err := os.ReadFile(path); err == nil {
+					var sidecar jellyfin.DetailedItem
+					if json.Unmarshal(data, &sidecar) == nil {
+						if sidecar.GetID() != "" {
+							m.downloadedIDCache[sidecar.GetID()] = true
+						}
+						// For episodes: record the series name
+						if sidecar.Type == "Episode" && sidecar.SeriesName != "" {
+							m.downloadedParentIDs[sidecar.SeriesName] = true
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+
+	// Second pass: scan directory structure for parent folders AND filenames
+	filepath.Walk(downloadsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(path), ".mkv") {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(downloadsDir, path)
+		if err != nil {
+			return nil
+		}
+
+		// Record parent folder names for show/season filtering
+		parts := strings.Split(filepath.Dir(relPath), string(filepath.Separator))
+		if len(parts) >= 1 && parts[0] != "" {
+			m.downloadedParentIDs[parts[0]] = true
+		}
+		if len(parts) >= 2 && parts[1] != "" {
+			m.downloadedParentIDs[parts[1]] = true
+			// Also add season number key for API name mismatch (e.g., "Season 01" vs "Season 1")
+			if num := extractSeasonNumber(parts[1]); num >= 0 {
+				m.downloadedParentIDs[fmt.Sprintf("season:%d", num)] = true
+			}
+		}
+
+		// Record base filename (without extension) for episode matching
+		baseName := strings.TrimSuffix(info.Name(), ".mkv")
+		m.downloadedFilenames[strings.ToLower(baseName)] = true
+
+		return nil
+	})
+}
+
 func (m model) View() string {
 	if m.err != nil {
-		return fmt.Sprintf("Error: %v\n\nPress 'q' to quit.", m.err)
+		return fmt.Sprintf(
+			"Error: %v\n\nPress 'q' to quit or 'ctrl+c' to exit.\nIf this persists, check ~/.config/jtui/jtui.log for details.",
+			m.err,
+		)
 	}
 
 	if m.successMsg != "" {
@@ -1996,7 +2330,7 @@ func (m model) View() string {
 	}
 
 	if m.loading {
-		return "Loading..."
+		return "Loading...\n\nPlease wait while fetching data from Jellyfin.\nPress 'q' to quit."
 	}
 
 	// Use cached viewport calculations for better performance
@@ -2013,6 +2347,15 @@ func (m model) View() string {
 	leftWidth := (m.width / 2) - 2
 	rightWidth := m.width - leftWidth - 2
 	contentHeight := m.height - 4 // Leave space for header, help, and spacing
+	if contentHeight < 5 {
+		contentHeight = 5
+	}
+	if leftWidth < 10 {
+		leftWidth = 10
+	}
+	if rightWidth < 10 {
+		rightWidth = 10
+	}
 
 	// Create panels with exact sizing
 	leftPane := m.renderItemList(leftWidth, contentHeight, viewport, viewportOffset)
@@ -2058,6 +2401,11 @@ func (m model) View() string {
 func (m model) renderItemList(width, height, viewport, viewportOffset int) string {
 	var content strings.Builder
 
+	// Guard against invalid dimensions
+	if width < 5 || height < 3 {
+		return ""
+	}
+
 	// Title based on current view (ensure it fits)
 	title := ""
 	switch m.currentView {
@@ -2092,11 +2440,24 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 		}
 	}
 
+	// Show filter indicator in title
+	if m.filter != FilterAll {
+		filteredCount := len(m.items)
+		totalCount := len(m.allItems)
+		title += fmt.Sprintf(" [%s: %d/%d]", m.filter, filteredCount, totalCount)
+	}
+
 	content.WriteString(titleStyle.Width(width - 4).Render(title))
 	content.WriteString("\n")
 
 	if len(m.items) == 0 {
-		content.WriteString(dimStyle.Render("No items found"))
+		if m.filter != FilterAll {
+			content.WriteString(dimStyle.Render(fmt.Sprintf("No %s items", strings.ToLower(m.filter.String()))))
+			content.WriteString("\n")
+			content.WriteString(dimStyle.Render("Press 'f' to clear filter"))
+		} else {
+			content.WriteString(dimStyle.Render("No items found"))
+		}
 		return content.String()
 	}
 
@@ -2220,6 +2581,11 @@ func (m model) renderItemList(width, height, viewport, viewportOffset int) strin
 }
 
 func (m model) renderDetails(width, height int) string {
+	// Guard against invalid dimensions
+	if width < 5 || height < 3 {
+		return ""
+	}
+
 	if m.currentDetails == nil {
 		// Check if we're on a virtual directory and show appropriate message
 		if len(m.items) > 0 && m.cursor < len(m.items) {
@@ -2240,10 +2606,6 @@ func (m model) renderDetails(width, height int) string {
 			case "virtual-recently-added-episodes":
 				return infoStyle.Render(
 					"Recently Added Episodes\n\nShows the latest episodes added to your library.\nPress Enter to browse recently added episodes.",
-				)
-			case "virtual-downloaded":
-				return infoStyle.Render(
-					"Downloaded\n\nBrowse your downloaded movies and shows.\nAvailable offline without a server connection.\nPress Enter to view downloads.",
 				)
 			}
 		}
@@ -2393,7 +2755,7 @@ func (m model) renderDetails(width, height int) string {
 					details.WriteString("\n")
 					linesUsed++
 				}
-				details.WriteString(dimStyle.Render("  Press 'x' to remove download"))
+				details.WriteString(dimStyle.Render("  Press 'd' to remove"))
 				details.WriteString("\n")
 				linesUsed += 2
 				if linesUsed >= maxLines {
@@ -2422,7 +2784,7 @@ func (m model) renderDetails(width, height int) string {
 		percentage := int(m.currentDetails.GetPlayedPercentage())
 		details.WriteString(infoStyle.Render(fmt.Sprintf("⏸️ Resume at %d%%", percentage)))
 		details.WriteString("\n")
-		details.WriteString(dimStyle.Render("  Press 'r' to resume, 'p' to restart"))
+		details.WriteString(dimStyle.Render("  Enter to resume, Space to restart"))
 		details.WriteString("\n")
 		linesUsed += 2
 		if linesUsed >= maxLines {
@@ -2513,26 +2875,24 @@ func setupCleanupHandlers() {
 
 // Pre-allocated help text to reduce allocations
 var helpText = strings.Join([]string{
-	"↑↓/jk: navigate",
-	"←→/PgUp/PgDn: page",
-	"g/G: top/bottom",
-	"Enter: select/resume",
-	"h/Bksp: back",
-	"p/Space: play/pause",
-	"r: resume",
-	"s: stop",
-	"u: cycle subs",
-	"a: cycle audio",
-	"w: toggle watched",
-	"d: download (item/season/show)",
-	"D: download entire show",
-	"x: remove download",
-	"/: search",
-	"q: quit",
+	"↑↓/jk navigate",
+	"Enter open",
+	"Space play/pause",
+	"h back",
+	"d download",
+	"f filter",
+	"w watched",
+	"/ search",
+	"q quit",
 }, " • ")
 
 func (m model) renderProgressBar() string {
 	if !m.isVideoPlaying || m.currentPlayingItem == nil {
+		return ""
+	}
+
+	// Guard against very narrow terminals
+	if m.width < 30 {
 		return ""
 	}
 
@@ -2641,6 +3001,9 @@ func (m model) renderProgressBar() string {
 
 // formatSeconds converts seconds to MM:SS or HH:MM:SS format
 func formatSeconds(seconds float64) string {
+	if seconds < 0 {
+		return "0:00"
+	}
 	totalSeconds := int(seconds)
 	hours := totalSeconds / 3600
 	minutes := (totalSeconds % 3600) / 60
@@ -2653,6 +3016,10 @@ func formatSeconds(seconds float64) string {
 }
 
 func (m model) renderHeader() string {
+	// Guard against very narrow terminals
+	if m.width < 10 {
+		return "JTUI"
+	}
 	// App title with modern styling
 	appName := headerTitleStyle.Render("󰚯 JTUI")
 
@@ -2702,10 +3069,15 @@ func (m model) renderHeader() string {
 	case SearchView:
 		currentLocation = "󰍉 Search: " + m.searchQuery
 	default:
+		// Show filter indicator if active
+		var filterPrefix string
+		if m.filter != FilterAll {
+			filterPrefix = fmt.Sprintf("[filter: %s] ", m.filter)
+		}
 		if len(m.currentPath) > 0 {
-			currentLocation = "󰉖 " + m.currentPath[len(m.currentPath)-1].name
+			currentLocation = filterPrefix + "󰉖 " + m.currentPath[len(m.currentPath)-1].name
 		} else {
-			currentLocation = "󰉕 Content"
+			currentLocation = filterPrefix + "󰉕 Content"
 		}
 	}
 
@@ -2718,7 +3090,11 @@ func (m model) renderHeader() string {
 
 	// Calculate spacing
 	usedSpace := lipgloss.Width(leftSide) + lipgloss.Width(rightSide)
-	spacer := strings.Repeat(" ", max(1, m.width-usedSpace-4))
+	spacerWidth := m.width - usedSpace - 4
+	if spacerWidth < 1 {
+		spacerWidth = 1
+	}
+	spacer := strings.Repeat(" ", spacerWidth)
 
 	headerContent := leftSide + spacer + rightSide
 
@@ -2726,6 +3102,11 @@ func (m model) renderHeader() string {
 }
 
 func (m model) renderHelp() string {
+	// Guard against very narrow terminals
+	if m.width < 10 {
+		return ""
+	}
+
 	// Ensure help text fits
 	if len(helpText) > m.width-2 {
 		// Use lipgloss truncate to handle ANSI properly

@@ -483,7 +483,7 @@ func (d *DownloadAPI) DownloadVideo(item *DetailedItem, progressCallback func(do
 	if err != nil {
 		return fmt.Errorf("failed to create file %s: %w", tempPath, err)
 	}
-	defer outFile.Close()
+	// Note: no defer close here - we close explicitly before rename or on error
 
 	// Copy with progress tracking
 	var downloaded int64
@@ -496,6 +496,7 @@ func (d *DownloadAPI) DownloadVideo(item *DetailedItem, progressCallback func(do
 		n, err := resp.Body.Read(buffer)
 		if n > 0 {
 			if _, writeErr := outFile.Write(buffer[:n]); writeErr != nil {
+				outFile.Close()
 				os.Remove(tempPath)
 				return fmt.Errorf("failed to write to file: %w", writeErr)
 			}
@@ -511,6 +512,7 @@ func (d *DownloadAPI) DownloadVideo(item *DetailedItem, progressCallback func(do
 			break
 		}
 		if err != nil {
+			outFile.Close()
 			os.Remove(tempPath)
 			return fmt.Errorf("failed to read response: %w", err)
 		}
@@ -683,9 +685,10 @@ func (d *DownloadAPI) RemoveDownload(item *DetailedItem) error {
 
 	if err := os.Remove(filePath); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("video file not found")
+			// File already gone, treat as success
+		} else {
+			return fmt.Errorf("failed to remove video file: %w", err)
 		}
-		return fmt.Errorf("failed to remove video file: %w", err)
 	}
 
 	// Remove metadata sidecar if it exists

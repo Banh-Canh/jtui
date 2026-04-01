@@ -249,7 +249,10 @@ func (a *AuthAPI) AuthenticateWithQuickConnect() error {
 		return fmt.Errorf("Quick Connect initiation failed: %w", err)
 	}
 
-	fmt.Printf("\nPlease enter this code in your Jellyfin app:\n\n    CODE: %s\n\nWaiting for approval (60 second timeout)...\n", quickConnectData.Code)
+	fmt.Printf(
+		"\nPlease enter this code in your Jellyfin app:\n\n    CODE: %s\n\nWaiting for approval (60 second timeout)...\n",
+		quickConnectData.Code,
+	)
 
 	timeout := time.Now().Add(60 * time.Second)
 	for time.Now().Before(timeout) {
