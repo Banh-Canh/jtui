@@ -55,7 +55,7 @@ func (s *SearchAPI) Items(options *SearchOptions) ([]Item, error) {
 	}
 
 	searchURL := fmt.Sprintf(
-		"%s/Users/%s/Items?searchTerm=%s&Recursive=%t&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1&Limit=%d",
+		"%s/Users/%s/Items?searchTerm=%s&Recursive=%t&Fields=BasicSyncInfo,UserData,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1&Limit=%d",
 		s.client.config.ServerURL,
 		s.client.config.UserID,
 		url.QueryEscape(options.Query),
@@ -63,7 +63,7 @@ func (s *SearchAPI) Items(options *SearchOptions) ([]Item, error) {
 		options.Limit,
 	)
 
-	var response ItemsResponse
+	var response DetailedItemsResponse
 	if err := s.client.doRequestDecode("GET", searchURL, nil, &response); err != nil {
 		return nil, err
 	}

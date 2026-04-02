@@ -91,12 +91,12 @@ func (i *ItemsAPI) GetResumeItems() ([]Item, error) {
 	}
 
 	url := fmt.Sprintf(
-		"%s/Users/%s/Items/Resume?Limit=12&Recursive=true&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
+		"%s/Users/%s/Items/Resume?Limit=12&Recursive=true&Fields=BasicSyncInfo,UserData,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
 		i.client.config.ServerURL,
 		i.client.config.UserID,
 	)
 
-	var response ItemsResponse
+	var response DetailedItemsResponse
 	if err := i.client.doRequestDecode("GET", url, nil, &response); err != nil {
 		return nil, err
 	}
@@ -111,12 +111,12 @@ func (i *ItemsAPI) GetNextUp() ([]Item, error) {
 	}
 
 	url := fmt.Sprintf(
-		"%s/Shows/NextUp?UserId=%s&Limit=12&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
+		"%s/Shows/NextUp?UserId=%s&Limit=12&Fields=BasicSyncInfo,UserData,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
 		i.client.config.ServerURL,
 		i.client.config.UserID,
 	)
 
-	var response ItemsResponse
+	var response DetailedItemsResponse
 	if err := i.client.doRequestDecode("GET", url, nil, &response); err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func (i *ItemsAPI) GetRecentlyAdded(itemType string) ([]Item, error) {
 	}
 
 	url := fmt.Sprintf(
-		"%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=%s&Fields=BasicSyncInfo,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
+		"%s/Users/%s/Items?Limit=24&Recursive=true&SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=%s&Fields=BasicSyncInfo,UserData,CanDelete,PrimaryImageAspectRatio&EnableImageTypes=Primary,Backdrop,Thumb&EnableTotalRecordCount=false&ImageTypeLimit=1",
 		i.client.config.ServerURL,
 		i.client.config.UserID,
 		itemType,
