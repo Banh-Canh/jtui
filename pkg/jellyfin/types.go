@@ -52,6 +52,7 @@ type DetailedItem struct {
 		IsFavorite            bool    `json:"IsFavorite"`
 		Played                bool    `json:"Played"`
 		PlayedPercentage      float64 `json:"PlayedPercentage"`
+		UnplayedItemCount     int     `json:"UnplayedItemCount"`
 	} `json:"UserData"`
 
 	// Series/Season information
@@ -111,6 +112,10 @@ func (d DetailedItem) IsWatched() bool {
 
 func (d DetailedItem) GetPlayedPercentage() float64 {
 	return d.UserData.PlayedPercentage
+}
+
+func (d DetailedItem) GetUnplayedItemCount() int {
+	return d.UserData.UnplayedItemCount
 }
 
 func (d DetailedItem) HasResumePosition() bool {
